@@ -1,6 +1,10 @@
 # EPUBReaderSwiftUI
 
-A SwiftUI‑first component for rendering EPUB books in iOS/macOS apps.
+A SwiftUI‑first component for rendering EPUB books.
+
+<img width="300" height="2622" alt="Simulator Screenshot - iPhone 17 Pro - 2025-10-25 at 12 18 45" src="https://github.com/user-attachments/assets/9575dbce-450d-402d-96da-07b0f4c0dc21" />
+<img width="300" height="2622" alt="Simulator Screenshot - iPhone 17 Pro - 2025-10-25 at 12 18 52" src="https://github.com/user-attachments/assets/f2d528c6-755e-43b1-83d7-659439e3cb6d" />
+
 
 ## 📦 Overview
 
