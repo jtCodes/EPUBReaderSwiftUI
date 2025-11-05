@@ -462,29 +462,37 @@ public class EPUBDownloader {
         case fileSystemError
     }
     
-    public static func downloadEPUB(from urlString: String) async throws -> URL {
+    public static func downloadEPUB(from urlString: String, useCache: Bool = true) async throws -> URL {
         guard let url = URL(string: urlString) else {
             throw DownloadError.invalidURL
         }
-        
-        let (tempURL, response) = try await URLSession.shared.download(from: url)
-        
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            throw DownloadError.downloadFailed
-        }
-        
+
         // Create a permanent location in Documents directory
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let fileName = url.lastPathComponent.isEmpty ? "downloaded.epub" : url.lastPathComponent
         let destinationURL = documentsPath.appendingPathComponent(fileName)
-        
+
+        // Check if file already exists and useCache is true
+        if useCache && FileManager.default.fileExists(atPath: destinationURL.path) {
+            print("📦 Using cached EPUB: \(fileName)")
+            return destinationURL
+        }
+
+        // Download the file
+        let (tempURL, response) = try await URLSession.shared.download(from: url)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            throw DownloadError.downloadFailed
+        }
+
         // Remove existing file if it exists
         try? FileManager.default.removeItem(at: destinationURL)
-        
+
         // Move downloaded file to permanent location
         try FileManager.default.moveItem(at: tempURL, to: destinationURL)
-        
+
+        print("📥 Downloaded EPUB: \(fileName)")
         return destinationURL
     }
 }
