@@ -301,6 +301,7 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
 
     public func makeUIViewController(context: Context) -> EPUBNavigatorViewController {
         let config = EPUBNavigatorViewController.Configuration()
+        
         guard let navigator = try? EPUBNavigatorViewController(
             publication: publication,
             initialLocation: initialLocator,
@@ -311,16 +312,20 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
         }
 
         context.coordinator.parent = self
-        Task { @MainActor in
-            navigator.delegate = context.coordinator
-            viewModel.setNavigator(navigator)
-            
-            // Apply initial font size
-            let prefs = EPUBPreferences(fontSize: fontSize)
-            navigator.submitPreferences(prefs)
-        }
-
-        let tapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap))
+        
+        // Set delegate BEFORE navigator is returned and can start loading
+        navigator.delegate = context.coordinator
+        viewModel.setNavigator(navigator)
+        
+        // Apply initial font size synchronously before first render
+        let prefs = EPUBPreferences(fontSize: fontSize)
+        navigator.submitPreferences(prefs)
+        
+        // Add tap gesture
+        let tapGesture = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTap)
+        )
         tapGesture.delegate = context.coordinator
         navigator.view.addGestureRecognizer(tapGesture)
 
