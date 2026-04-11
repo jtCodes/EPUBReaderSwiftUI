@@ -449,101 +449,120 @@ public struct DefaultEPUBReaderOverlay: View {
 
     // MARK: - Top bar
     private var topBar: some View {
-        VStack(spacing: 12) {
-            HStack {
+        VStack(spacing: 0) {
+            // Row 1: Close, title, actions
+            HStack(spacing: 0) {
+                // Close button — left edge
                 Button(action: context.close) {
                     Image(systemName: "xmark")
-                        .font(.title3)
+                        .font(.body.weight(.medium))
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
                 }
 
-                Button(action: context.showTableOfContents) {
-                    Image(systemName: "list.bullet")
-                        .font(.title3)
-                }
-
-                Button(action: context.toggleBookmark) {
-                    Image(systemName: context.isCurrentPageBookmarked ? "bookmark.fill" : "bookmark")
-                        .font(.title3)
-                        .foregroundStyle(context.isCurrentPageBookmarked ? Color.accentColor : .primary)
-                }
-
-                // Bookmarks list (show badge with count)
-                Button(action: context.showBookmarkList) {
-                    Image(systemName: "books.vertical")
-                        .font(.title3)
-                }
-                .overlay(alignment: .topTrailing) {
-                    if !context.bookmarks.isEmpty {
-                        Text("\(context.bookmarks.count)")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(.white)
-                            .padding(3)
-                            .background(Color.accentColor)
-                            .clipShape(Circle())
-                            .offset(x: 6, y: -6)
+                // Title + chapter
+                VStack(spacing: 1) {
+                    Text(context.title ?? "")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    if let chapter = context.chapterTitle {
+                        Text(chapter)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                 }
+                .frame(maxWidth: .infinity)
 
-                Text(context.title ?? "Unknown Title")
-                    .font(.headline)
-                    .lineLimit(1)
+                // Right-side action buttons
+                HStack(spacing: 14) {
+                    Button(action: context.showTableOfContents) {
+                        Image(systemName: "list.bullet")
+                            .font(.body)
+                    }
 
-                Spacer()
+                    Button(action: context.toggleBookmark) {
+                        Image(systemName: context.isCurrentPageBookmarked ? "bookmark.fill" : "bookmark")
+                            .font(.body)
+                            .foregroundStyle(context.isCurrentPageBookmarked ? Color.accentColor : .primary)
+                    }
 
-                if let author = context.author {
-                    Text(author)
-                        .font(.subheadline)
-                        .lineLimit(1)
+                    Button(action: context.showBookmarkList) {
+                        Image(systemName: "books.vertical")
+                            .font(.body)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if !context.bookmarks.isEmpty {
+                            Text("\(context.bookmarks.count)")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(2.5)
+                                .background(Color.accentColor)
+                                .clipShape(Circle())
+                                .offset(x: 8, y: -8)
+                        }
+                    }
                 }
             }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Font Size")
-                    .font(.caption)
+            Divider().opacity(0.5)
 
-                HStack {
+            // Row 2: Compact font size control
+            HStack(spacing: 12) {
+                Button {
+                    context.fontSize.wrappedValue = max(0.75, context.fontSize.wrappedValue - 0.25)
+                } label: {
                     Text("A")
-                        .font(.caption)
+                        .font(.footnote)
+                        .frame(width: 32, height: 28)
+                        .background(Color.primary.opacity(0.08))
+                        .cornerRadius(6)
+                }
 
-                    Slider(value: context.fontSize, in: 0.75...2.0, step: 0.25)
+                Slider(value: context.fontSize, in: 0.75...2.0, step: 0.25)
+                    .tint(.primary.opacity(0.4))
 
+                Button {
+                    context.fontSize.wrappedValue = min(2.0, context.fontSize.wrappedValue + 0.25)
+                } label: {
                     Text("A")
                         .font(.title3)
-
-                    Text("\(Int(context.fontSize.wrappedValue * 100))%")
-                        .font(.caption)
-                        .frame(width: 50)
+                        .frame(width: 32, height: 28)
+                        .background(Color.primary.opacity(0.08))
+                        .cornerRadius(6)
                 }
+
+                Text("\(Int(context.fontSize.wrappedValue * 100))%")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36)
             }
+            .buttonStyle(.plain)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
         }
-        .padding()
         .background(.ultraThinMaterial)
-        .cornerRadius(12)
-        .padding()
     }
 
     // MARK: - Bottom bar
     private var bottomBar: some View {
-        VStack(spacing: 8) {
-            if let chapterTitle = context.chapterTitle {
-                Text(chapterTitle)
-                    .font(.caption)
-                    .lineLimit(1)
-            }
-
+        VStack(spacing: 6) {
             if let progression = context.totalProgression {
-                HStack {
+                HStack(spacing: 8) {
                     ProgressView(value: progression)
+                        .tint(.primary.opacity(0.5))
                     Text("\(Int(progression * 100))%")
-                        .font(.caption2)
-                        .frame(width: 40)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32)
                 }
             }
         }
-        .padding()
+        .padding(.horizontal)
+        .padding(.vertical, 10)
         .background(.ultraThinMaterial)
-        .cornerRadius(12)
-        .padding()
     }
 }
 
