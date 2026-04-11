@@ -12,6 +12,354 @@ import ReadiumAdapterGCDWebServer
 public typealias EPUBReaderSwiftUILocator = Locator
 public typealias EPUBReaderSwiftUILink = ReadiumShared.Link
 
+// MARK: - Highlight Types
+
+/// A color for a user highlight.
+public enum EPUBHighlightColor: String, Codable, CaseIterable, Sendable {
+    case yellow, green, blue, red, purple
+
+    /// Maps to a UIColor for Readium's Decoration tint.
+    public var uiColor: UIColor {
+        switch self {
+        case .yellow: return .systemYellow
+        case .green:  return .systemGreen
+        case .blue:   return .systemBlue
+        case .red:    return .systemRed
+        case .purple: return .systemPurple
+        }
+    }
+}
+
+/// The visual style of a highlight decoration.
+public enum EPUBHighlightStyle: String, Codable, Sendable {
+    case highlight
+    case underline
+}
+
+/// A user highlight in a publication.
+///
+/// Readium only renders highlights — your app is responsible for persisting them.
+/// Pass highlights in via a `Binding<[EPUBHighlight]>` and the library will
+/// render them using Readium's Decoration API.
+public struct EPUBHighlight: Identifiable, Equatable, Hashable {
+    public var id: String
+    public var locator: Locator
+    public var color: EPUBHighlightColor
+    public var style: EPUBHighlightStyle
+    /// An optional user note attached to the highlight.
+    public var note: String?
+
+    /// The highlighted text, if available.
+    public var highlightText: String? {
+        locator.text.highlight
+    }
+
+    public init(
+        id: String = UUID().uuidString,
+        locator: Locator,
+        color: EPUBHighlightColor = .yellow,
+        style: EPUBHighlightStyle = .highlight,
+        note: String? = nil
+    ) {
+        self.id = id
+        self.locator = locator
+        self.color = color
+        self.style = style
+        self.note = note
+    }
+}
+
+// MARK: - EPUBHighlight + Codable
+// Readium's `Locator` does not conform to `Codable`; it uses custom
+// JSON serialisation via `jsonString` / `init(jsonString:)`.  We bridge
+// that here so consumers can still encode / decode `EPUBHighlight`
+// with standard `JSONEncoder` / `JSONDecoder`.
+extension EPUBHighlight: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id, locatorJSON, color, style, note
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(color, forKey: .color)
+        try container.encode(style, forKey: .style)
+        try container.encodeIfPresent(note, forKey: .note)
+
+        // Serialize Locator via Readium's own JSON representation.
+        guard let locatorString = locator.jsonString else {
+            throw EncodingError.invalidValue(locator, .init(
+                codingPath: encoder.codingPath,
+                debugDescription: "Locator could not be serialized to JSON string"
+            ))
+        }
+        try container.encode(locatorString, forKey: .locatorJSON)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        color = try container.decode(EPUBHighlightColor.self, forKey: .color)
+        style = try container.decode(EPUBHighlightStyle.self, forKey: .style)
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+
+        let locatorString = try container.decode(String.self, forKey: .locatorJSON)
+        guard let loc = try Locator(jsonString: locatorString) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .locatorJSON,
+                in: container,
+                debugDescription: "Invalid Locator JSON string"
+            )
+        }
+        locator = loc
+    }
+
+    /// Converts to a Readium `Decoration` for rendering.
+    func toDecoration(isActive: Bool = false) -> Decoration {
+        let decoStyle: Decoration.Style
+        switch style {
+        case .highlight:
+            decoStyle = .highlight(tint: color.uiColor, isActive: isActive)
+        case .underline:
+            decoStyle = .underline(tint: color.uiColor, isActive: isActive)
+        }
+        return Decoration(id: id, locator: locator, style: decoStyle)
+    }
+}
+
+/// Event fired when the user taps an existing highlight.
+public struct EPUBHighlightTapEvent {
+    /// The tapped highlight.
+    public let highlight: EPUBHighlight
+    /// The bounding rect of the highlight in the navigator view's coordinate space.
+    /// Useful for anchoring a popover.
+    public let rect: CGRect?
+}
+
+// MARK: - Bookmark Types
+
+/// A user bookmark in a publication.
+///
+/// Your app owns the `[EPUBBookmark]` array and is responsible for persisting it.
+/// Pass bookmarks in via a `Binding<[EPUBBookmark]>` and the library will
+/// expose toggle/query actions through `EPUBReaderOverlayContext`.
+public struct EPUBBookmark: Identifiable, Equatable, Hashable {
+    public var id: String
+    public var locator: Locator
+    public var createdAt: Date
+    /// Explicit chapter title, set when the bookmark is created.
+    /// Falls back to `locator.title` if not provided.
+    public var title: String?
+    /// A short text preview captured from the page when the bookmark was created.
+    public var textPreview: String?
+
+    /// The chapter title — prefers the explicit `title`, then the locator's title.
+    public var chapterTitle: String? {
+        if let t = title, !t.isEmpty { return t }
+        if let t = locator.title, !t.isEmpty { return t }
+        return nil
+    }
+
+    /// A display label: chapter title if available, otherwise a text preview
+    /// from the bookmarked position, or a progression percentage as last resort.
+    public var displayTitle: String {
+        if let t = chapterTitle { return t }
+        if let t = textPreview, !t.isEmpty { return t }
+        if let prog = progression { return "Page at \(Int(prog * 100))%" }
+        return "Bookmark"
+    }
+
+    /// The total reading progression at the bookmark (0.0–1.0).
+    public var progression: Double? {
+        locator.locations.totalProgression
+    }
+
+    public init(
+        id: String = UUID().uuidString,
+        locator: Locator,
+        title: String? = nil,
+        textPreview: String? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.locator = locator
+        self.title = title
+        self.textPreview = textPreview
+        self.createdAt = createdAt
+    }
+}
+
+// MARK: - EPUBBookmark + Codable
+extension EPUBBookmark: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id, locatorJSON, createdAt, title, textPreview
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(title, forKey: .title)
+        try container.encodeIfPresent(textPreview, forKey: .textPreview)
+
+        guard let locatorString = locator.jsonString else {
+            throw EncodingError.invalidValue(locator, .init(
+                codingPath: encoder.codingPath,
+                debugDescription: "Locator could not be serialized to JSON string"
+            ))
+        }
+        try container.encode(locatorString, forKey: .locatorJSON)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        textPreview = try container.decodeIfPresent(String.self, forKey: .textPreview)
+
+        let locatorString = try container.decode(String.self, forKey: .locatorJSON)
+        guard let loc = try Locator(jsonString: locatorString) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .locatorJSON,
+                in: container,
+                debugDescription: "Invalid Locator JSON string"
+            )
+        }
+        locator = loc
+    }
+}
+
+// MARK: - Default Highlight Edit Sheet
+/// Built-in sheet for editing or deleting a highlight (color, style, note, delete).
+/// Shown automatically when the user taps a highlight and no custom
+/// `onHighlightTapped` handler is provided.
+public struct DefaultHighlightEditSheet: View {
+    let highlight: EPUBHighlight
+    let onChangeColor: (EPUBHighlightColor) -> Void
+    let onToggleStyle: () -> Void
+    let onUpdateNote: (String?) -> Void
+    let onDelete: () -> Void
+    let onDismiss: () -> Void
+
+    @State private var noteText: String = ""
+
+    public init(
+        highlight: EPUBHighlight,
+        onChangeColor: @escaping (EPUBHighlightColor) -> Void,
+        onToggleStyle: @escaping () -> Void,
+        onUpdateNote: @escaping (String?) -> Void,
+        onDelete: @escaping () -> Void,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.highlight = highlight
+        self.onChangeColor = onChangeColor
+        self.onToggleStyle = onToggleStyle
+        self.onUpdateNote = onUpdateNote
+        self.onDelete = onDelete
+        self.onDismiss = onDismiss
+        _noteText = State(initialValue: highlight.note ?? "")
+    }
+
+    public var body: some View {
+        VStack(spacing: 20) {
+            // Header
+            HStack {
+                Text("Edit Highlight")
+                    .font(.headline)
+                Spacer()
+                Button("Done") {
+                    // Save note on dismiss — treat empty string as nil
+                    let trimmed = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    onUpdateNote(trimmed.isEmpty ? nil : trimmed)
+                    onDismiss()
+                }
+            }
+
+            // Highlighted text preview
+            if let text = highlight.highlightText {
+                Text("\u{201C}\(text)\u{201D}")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            // Color picker row
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Color")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    ForEach(EPUBHighlightColor.allCases, id: \.self) { color in
+                        Button {
+                            onChangeColor(color)
+                        } label: {
+                            Circle()
+                                .fill(Color(color.uiColor))
+                                .frame(width: 32, height: 32)
+                                .overlay(
+                                    Circle()
+                                        .strokeBorder(Color.primary, lineWidth: highlight.color == color ? 2.5 : 0)
+                                )
+                        }
+                    }
+                }
+            }
+
+            // Note field
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Note")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextEditor(text: $noteText)
+                    .frame(minHeight: 60, maxHeight: 120)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(UIColor.separator), lineWidth: 0.5)
+                    )
+                    .overlay(alignment: .topLeading) {
+                        if noteText.isEmpty {
+                            Text("Add a note\u{2026}")
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 8)
+                                .allowsHitTesting(false)
+                        }
+                    }
+            }
+
+            HStack(spacing: 16) {
+                // Toggle style
+                Button {
+                    onToggleStyle()
+                } label: {
+                    Label(
+                        highlight.style == .highlight ? "Switch to Underline" : "Switch to Highlight",
+                        systemImage: highlight.style == .highlight ? "underline" : "highlighter"
+                    )
+                    .font(.subheadline)
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
+
+                // Delete
+                Button(role: .destructive) {
+                    onDelete()
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .font(.subheadline)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding()
+    }
+}
+
 // MARK: - TOC Context
 /// All the state and actions available to a custom table of contents view.
 public struct EPUBReaderTOCContext {
@@ -51,6 +399,21 @@ public struct EPUBReaderOverlayContext {
     // Font size — bind to a Slider or stepper in your overlay
     public var fontSize: Binding<Double>
 
+    // Bookmarks
+    /// Whether the current page/chapter has a bookmark.
+    public let isCurrentPageBookmarked: Bool
+    /// All bookmarks (read-only snapshot for listing in custom overlays).
+    public let bookmarks: [EPUBBookmark]
+    /// Toggles a bookmark for the current reading position — adds if none
+    /// exists for this chapter, removes the matching one otherwise.
+    public let toggleBookmark: () -> Void
+    /// Opens the built-in bookmarks list sheet.
+    public let showBookmarkList: () -> Void
+    /// Navigate to a specific locator (e.g. a bookmark's locator).
+    public let navigateToLocator: (Locator) -> Void
+    /// Delete a bookmark by its ID.
+    public let deleteBookmark: (String) -> Void
+
     // Actions
     public let close: () -> Void
     public let showTableOfContents: () -> Void
@@ -63,6 +426,7 @@ public struct EPUBReaderOverlayContext {
 /// The built-in overlay used when no custom overlay is provided.
 public struct DefaultEPUBReaderOverlay: View {
     public let context: EPUBReaderOverlayContext
+    @State private var showFontSizeControls = false
 
     public init(context: EPUBReaderOverlayContext) {
         self.context = context
@@ -82,82 +446,149 @@ public struct DefaultEPUBReaderOverlay: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .onChange(of: context.showControls) { isVisible in
+            // Collapse the font controls whenever the overlay closes.
+            if !isVisible {
+                showFontSizeControls = false
+            }
+        }
     }
 
     // MARK: - Top bar
     private var topBar: some View {
-        VStack(spacing: 12) {
-            HStack {
+        VStack(spacing: 0) {
+            // Row 1: Close, title, actions
+            HStack(spacing: 0) {
+                // Close button — left edge
                 Button(action: context.close) {
                     Image(systemName: "xmark")
-                        .font(.title3)
+                        .font(.body.weight(.medium))
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
                 }
 
-                Button(action: context.showTableOfContents) {
-                    Image(systemName: "list.bullet")
-                        .font(.title3)
-                }
-
-                Text(context.title ?? "Unknown Title")
-                    .font(.headline)
-                    .lineLimit(1)
-
-                Spacer()
-
-                if let author = context.author {
-                    Text(author)
-                        .font(.subheadline)
+                // Title + chapter
+                VStack(spacing: 1) {
+                    Text(context.title ?? "")
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
+                    if let chapter = context.chapterTitle {
+                        Text(chapter)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+
+                // Right-side action buttons
+                HStack(spacing: 14) {
+                    Button(action: context.showTableOfContents) {
+                        Image(systemName: "list.bullet")
+                            .font(.body)
+                    }
+
+                    Button(action: context.toggleBookmark) {
+                        Image(systemName: context.isCurrentPageBookmarked ? "bookmark.fill" : "bookmark")
+                            .font(.body)
+                            .foregroundStyle(context.isCurrentPageBookmarked ? Color.accentColor : .primary)
+                    }
+
+                    Button(action: context.showBookmarkList) {
+                        Image(systemName: "books.vertical")
+                            .font(.body)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if !context.bookmarks.isEmpty {
+                            Text("\(context.bookmarks.count)")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(2.5)
+                                .background(Color.accentColor)
+                                .clipShape(Circle())
+                                .offset(x: 8, y: -8)
+                        }
+                    }
                 }
             }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Font Size")
-                    .font(.caption)
+            Divider().opacity(0.5)
 
-                HStack {
-                    Text("A")
-                        .font(.caption)
+            // Row 2: Two-step font size control (tap to expand)
+            HStack(spacing: 12) {
+                if showFontSizeControls {
+                    Button {
+                        context.fontSize.wrappedValue = max(0.75, context.fontSize.wrappedValue - 0.25)
+                    } label: {
+                        Text("A")
+                            .font(.footnote)
+                            .frame(width: 32, height: 28)
+                            .background(Color.primary.opacity(0.08))
+                            .cornerRadius(6)
+                    }
 
                     Slider(value: context.fontSize, in: 0.75...2.0, step: 0.25)
+                        .tint(.primary.opacity(0.4))
 
-                    Text("A")
-                        .font(.title3)
+                    Button {
+                        context.fontSize.wrappedValue = min(2.0, context.fontSize.wrappedValue + 0.25)
+                    } label: {
+                        Text("A")
+                            .font(.title3)
+                            .frame(width: 32, height: 28)
+                            .background(Color.primary.opacity(0.08))
+                            .cornerRadius(6)
+                    }
 
-                    Text("\(Int(context.fontSize.wrappedValue * 100))%")
-                        .font(.caption)
-                        .frame(width: 50)
+                    Button {
+                        showFontSizeControls = false
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 24, height: 24)
+                            .background(Color.primary.opacity(0.08))
+                            .clipShape(Circle())
+                    }
+                } else {
+                    Button {
+                        showFontSizeControls = true
+                    } label: {
+                        Label("Font", systemImage: "textformat.size")
+                            .font(.caption.weight(.semibold))
+                    }
                 }
+
+                Text("\(Int(context.fontSize.wrappedValue * 100))%")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36)
             }
+            .buttonStyle(.plain)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
         }
-        .padding()
         .background(.ultraThinMaterial)
-        .cornerRadius(12)
-        .padding()
     }
 
     // MARK: - Bottom bar
     private var bottomBar: some View {
-        VStack(spacing: 8) {
-            if let chapterTitle = context.chapterTitle {
-                Text(chapterTitle)
-                    .font(.caption)
-                    .lineLimit(1)
-            }
-
+        VStack(spacing: 6) {
             if let progression = context.totalProgression {
-                HStack {
+                HStack(spacing: 8) {
                     ProgressView(value: progression)
+                        .tint(.primary.opacity(0.5))
                     Text("\(Int(progression * 100))%")
-                        .font(.caption2)
-                        .frame(width: 40)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32)
                 }
             }
         }
-        .padding()
+        .padding(.horizontal)
+        .padding(.vertical, 10)
         .background(.ultraThinMaterial)
-        .cornerRadius(12)
-        .padding()
     }
 }
 
@@ -170,17 +601,46 @@ public struct EPUBReaderView<Overlay: View, TOCView: View>: View {
     let overlay: (EPUBReaderOverlayContext) -> Overlay
     let tocView: (EPUBReaderTOCContext) -> TOCView
 
+    // Highlight support
+    @Binding var highlights: [EPUBHighlight]
+    let onHighlightCreated: ((EPUBHighlight) -> Void)?
+    let onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)?
+
+    // Bookmark support
+    @Binding var bookmarks: [EPUBBookmark]
+
     @MainActor @StateObject private var viewModel = EPUBReaderViewModel()
     @State private var fontSize: Double
     @State private var showControls = false
     @State private var showTOC = false
+    @State private var showBookmarkList = false
     @State private var currentLocator: Locator?
 
+    // Internal state for the built-in highlight popover
+    @State private var editingHighlight: EPUBHighlight?
+    @State private var showHighlightPopover = false
+    @State private var highlightPopoverAnchor: CGPoint = .zero
+
     /// Initialize with an `EPUBSource`, a custom overlay, and a custom TOC view.
-    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
+    public init(
+        source: EPUBSource,
+        initialLocator: EPUBReaderSwiftUILocator? = nil,
+        initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(),
+        highlights: Binding<[EPUBHighlight]> = .constant([]),
+        onHighlightCreated: ((EPUBHighlight) -> Void)? = nil,
+        onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil,
+        bookmarks: Binding<[EPUBBookmark]> = .constant([]),
+        onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void,
+        @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay,
+        @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView
+    ) {
         self.source = source
         self.initialLocator = initialLocator
         self.initialPreferences = initialPreferences
+        self._highlights = highlights
+        self.onHighlightCreated = onHighlightCreated
+        self.onHighlightTapped = onHighlightTapped
+        self._bookmarks = bookmarks
         self.onClose = onClose
         self.overlay = overlay
         self.tocView = tocView
@@ -188,45 +648,61 @@ public struct EPUBReaderView<Overlay: View, TOCView: View>: View {
     }
 
     /// Convenience: remote URL with custom overlay and TOC.
-    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
-        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay, tocView: tocView)
+    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
+        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose, overlay: overlay, tocView: tocView)
     }
 
     /// Convenience: local file URL with custom overlay and TOC.
-    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
-        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay, tocView: tocView)
+    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
+        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose, overlay: overlay, tocView: tocView)
     }
 }
 
 // MARK: - Default overlay + default TOC inits (fully backward-compatible)
 extension EPUBReaderView where Overlay == DefaultEPUBReaderOverlay, TOCView == DefaultEPUBReaderTOCView {
 
-    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
-        self.init(source: source, initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: { DefaultEPUBReaderOverlay(context: $0) }, tocView: { DefaultEPUBReaderTOCView(context: $0) })
+    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
+        self.init(source: source, initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose, overlay: { DefaultEPUBReaderOverlay(context: $0) }, tocView: { DefaultEPUBReaderTOCView(context: $0) })
     }
 
-    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
-        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose)
+    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
+        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose)
     }
 
-    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
-        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose)
+    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
+        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose)
+    }
+}
+
+// MARK: - Default overlay + custom TOC
+extension EPUBReaderView where Overlay == DefaultEPUBReaderOverlay {
+
+    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
+        self.init(source: source, initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose, overlay: { DefaultEPUBReaderOverlay(context: $0) }, tocView: tocView)
+    }
+
+    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
+        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose, tocView: tocView)
+    }
+
+    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
+        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose, tocView: tocView)
     }
 }
 
 // MARK: - Custom overlay + default TOC
 extension EPUBReaderView where TOCView == DefaultEPUBReaderTOCView {
 
-    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
-        self.init(source: source, initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay, tocView: { DefaultEPUBReaderTOCView(context: $0) })
+    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
+        self.init(source: source, initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose, overlay: overlay, tocView: { DefaultEPUBReaderTOCView(context: $0) })
     }
 
-    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
-        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay)
+    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
+        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose, overlay: overlay)
     }
 
-    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
-        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay)
+    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), highlights: Binding<[EPUBHighlight]> = .constant([]), onHighlightCreated: ((EPUBHighlight) -> Void)? = nil, onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? = nil, bookmarks: Binding<[EPUBBookmark]> = .constant([]), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
+        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, highlights: highlights, onHighlightCreated: onHighlightCreated, onHighlightTapped: onHighlightTapped, bookmarks: bookmarks, onClose: onClose, overlay: overlay)
     }
 }
 
@@ -297,6 +773,84 @@ extension EPUBReaderView {
                 dismiss: { showTOC = false }
             ))
         }
+        .sheet(isPresented: $showBookmarkList) {
+            DefaultBookmarkListView(
+                bookmarks: bookmarks,
+                onNavigate: { bookmark in
+                    Task { await viewModel.navigateToLocator(bookmark.locator) }
+                    showBookmarkList = false
+                },
+                onDelete: { id in
+                    bookmarks.removeAll { $0.id == id }
+                },
+                onDismiss: { showBookmarkList = false }
+            )
+        }
+        // Built-in highlight popover anchored near the tapped highlight
+        .overlay(
+            Color.clear
+                .frame(width: 1, height: 1)
+                .position(highlightPopoverAnchor)
+                .popover(isPresented: $showHighlightPopover) {
+                    if let hl = editingHighlight {
+                        DefaultHighlightEditSheet(
+                            highlight: hl,
+                            onChangeColor: { newColor in
+                                if let idx = highlights.firstIndex(where: { $0.id == hl.id }) {
+                                    highlights[idx].color = newColor
+                                    editingHighlight = highlights[idx]
+                                }
+                            },
+                            onToggleStyle: {
+                                if let idx = highlights.firstIndex(where: { $0.id == hl.id }) {
+                                    highlights[idx].style = highlights[idx].style == .highlight ? .underline : .highlight
+                                    editingHighlight = highlights[idx]
+                                }
+                            },
+                            onUpdateNote: { newNote in
+                                if let idx = highlights.firstIndex(where: { $0.id == hl.id }) {
+                                    highlights[idx].note = newNote
+                                }
+                            },
+                            onDelete: {
+                                highlights.removeAll { $0.id == hl.id }
+                                showHighlightPopover = false
+                            },
+                            onDismiss: {
+                                showHighlightPopover = false
+                            }
+                        )
+                        .frame(width: 320)
+                    }
+                }
+        )
+    }
+
+    /// The effective `onHighlightCreated` handler: uses the consumer's
+    /// callback if provided, otherwise falls back to appending to the
+    /// highlights binding automatically.  Returns nil when the consumer
+    /// has not opted-in to highlighting at all.
+    private var resolvedOnHighlightCreated: ((EPUBHighlight) -> Void)? {
+        onHighlightCreated
+    }
+
+    /// The effective `onHighlightTapped` handler: uses the consumer's
+    /// callback if provided, otherwise falls back to showing the built-in
+    /// popover — but only when highlighting is enabled.
+    private var resolvedOnHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? {
+        if onHighlightTapped != nil { return onHighlightTapped }
+        // Show the default edit popover only if the caller opted-in to highlighting.
+        guard onHighlightCreated != nil else { return nil }
+        return { event in
+            editingHighlight = event.highlight
+            // Position the popover anchor at the top-center of the highlight rect
+            if let rect = event.rect {
+                highlightPopoverAnchor = CGPoint(x: rect.midX, y: rect.minY)
+            } else {
+                highlightPopoverAnchor = CGPoint(x: UIScreen.main.bounds.midX, y: UIScreen.main.bounds.midY)
+            }
+            showHighlightPopover = true
+        }
     }
 
     private func readerContent(publication: Publication) -> some View {
@@ -307,6 +861,9 @@ extension EPUBReaderView {
                 initialLocator: initialLocator,
                 fontSize: $fontSize,
                 currentLocator: $currentLocator,
+                highlights: $highlights,
+                onHighlightCreated: resolvedOnHighlightCreated,
+                onHighlightTapped: resolvedOnHighlightTapped,
                 viewModel: viewModel,
                 onTap: {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -316,12 +873,46 @@ extension EPUBReaderView {
             )
             .ignoresSafeArea()
 
+            let isBookmarked: Bool = {
+                guard let loc = currentLocator else { return false }
+                return bookmarks.contains(where: { Self.bookmarkMatchesLocator($0, loc) })
+            }()
+
             let context = EPUBReaderOverlayContext(
                 title: publication.metadata.title,
                 author: publication.metadata.authors.first?.name,
                 currentLocator: currentLocator,
                 showControls: showControls,
                 fontSize: $fontSize,
+                isCurrentPageBookmarked: isBookmarked,
+                bookmarks: bookmarks,
+                toggleBookmark: {
+                    guard let loc = currentLocator else { return }
+                    if let idx = bookmarks.firstIndex(where: { Self.bookmarkMatchesLocator($0, loc) }) {
+                        bookmarks.remove(at: idx)
+                    } else {
+                        let chapterTitle = Self.chapterTitle(for: loc, in: viewModel.tableOfContents)
+                        let preview = Self.textPreview(from: loc)
+                        // Create the bookmark immediately, then fetch page text async
+                        let bookmark = EPUBBookmark(locator: loc, title: chapterTitle, textPreview: preview)
+                        bookmarks.append(bookmark)
+                        // Grab visible text from the web view to enrich the preview
+                        Task {
+                            if let pageText = await viewModel.getVisiblePageText(maxLength: 150) {
+                                if let idx = bookmarks.firstIndex(where: { $0.id == bookmark.id }) {
+                                    bookmarks[idx].textPreview = pageText
+                                }
+                            }
+                        }
+                    }
+                },
+                showBookmarkList: { showBookmarkList = true },
+                navigateToLocator: { locator in
+                    Task { await viewModel.navigateToLocator(locator) }
+                },
+                deleteBookmark: { id in
+                    bookmarks.removeAll { $0.id == id }
+                },
                 close: {
                     let preferences = EPUBReaderSwiftUIPreferences(fontSize: fontSize)
                     onClose(currentLocator, preferences)
@@ -341,6 +932,88 @@ extension EPUBReaderView {
 
             overlay(context)
         }
+    }
+
+    /// Checks whether a bookmark matches a given locator (same page).
+    /// Uses `locations.progression` (most granular) as primary match.
+    private static func bookmarkMatchesLocator(_ bookmark: EPUBBookmark, _ locator: Locator) -> Bool {
+        guard "\(bookmark.locator.href)" == "\(locator.href)" else { return false }
+
+        // Prefer progression — it's the most granular indicator of position
+        // within a resource. Use a very tight tolerance.
+        if let bmProg = bookmark.locator.locations.progression,
+           let locProg = locator.locations.progression {
+            return abs(bmProg - locProg) < 0.001
+        }
+
+        // Fall back to position only if progression isn't available
+        if let bmPos = bookmark.locator.locations.position,
+           let locPos = locator.locations.position {
+            return bmPos == locPos
+        }
+
+        return false
+    }
+
+    /// Finds the best matching chapter title for a locator by walking
+    /// the table of contents.  Returns the locator's own title as a
+    /// fallback, or `nil` if nothing is available.
+    private static func chapterTitle(for locator: Locator, in toc: [ReadiumShared.Link]) -> String? {
+        let locHref = "\(locator.href)"
+
+        func hrefMatches(_ linkHrefRaw: String) -> Bool {
+            let linkHref = linkHrefRaw.components(separatedBy: "#").first ?? linkHrefRaw
+            let locBase = locHref.components(separatedBy: "#").first ?? locHref
+            if linkHref == locBase { return true }
+            if locBase.hasSuffix("/\(linkHref)") || locBase.hasSuffix(linkHref) { return true }
+            if linkHref.hasSuffix("/\(locBase)") || linkHref.hasSuffix(locBase) { return true }
+            return false
+        }
+
+        // Walk TOC (including children) and find the last link whose
+        // href matches — "last" because TOC is ordered and deeper
+        // entries are more specific.
+        func search(_ links: [ReadiumShared.Link]) -> String? {
+            var best: String?
+            for link in links {
+                if hrefMatches("\(link.href)") {
+                    if let t = link.title, !t.isEmpty { best = t }
+                }
+                if let childResult = search(link.children) {
+                    best = childResult
+                }
+            }
+            return best
+        }
+        if let title = search(toc) { return title }
+        if let title = locator.title, !title.isEmpty { return title }
+        return nil
+    }
+
+    /// Builds a short text preview from the locator's text fields.
+    /// Readium may populate `text.highlight`, `text.before`, or `text.after`
+    /// depending on the context.  We concatenate whatever is available and
+    /// truncate to a readable snippet.
+    private static func textPreview(from locator: Locator, maxLength: Int = 120) -> String? {
+        let parts = [
+            locator.text.highlight,
+            locator.text.before,
+            locator.text.after
+        ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+         .filter { !$0.isEmpty }
+
+        guard !parts.isEmpty else { return nil }
+
+        let joined = parts.joined(separator: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+
+        if joined.count <= maxLength { return joined }
+        let truncated = String(joined.prefix(maxLength))
+        // Break at last space to avoid cutting a word
+        if let lastSpace = truncated.lastIndex(of: " ") {
+            return String(truncated[..<lastSpace]) + "\u{2026}"
+        }
+        return truncated + "\u{2026}"
     }
 }
 
@@ -378,6 +1051,56 @@ public class EPUBReaderViewModel: ObservableObject {
     func navigateToLink(_ link: ReadiumShared.Link) async {
         guard let locator = await publication?.locate(link) else { return }
         await navigator?.go(to: locator)
+    }
+
+    func navigateToLocator(_ locator: Locator) async {
+        await navigator?.go(to: locator)
+    }
+
+    /// Grabs a short snippet of visible text from the current page via JavaScript.
+    func getVisiblePageText(maxLength: Int = 200) async -> String? {
+        guard let navigator = navigator else { return nil }
+        let js = """
+        (function() {
+            // Find the exact text position at the top-left of the visible area
+            var startRange = null;
+            // Probe from top-left, scanning down to find actual text
+            for (var y = 0; y < window.innerHeight && !startRange; y += 5) {
+                for (var x = 10; x < window.innerWidth * 0.5 && !startRange; x += 10) {
+                    var r = document.caretRangeFromPoint(x, y);
+                    if (r && r.startContainer && r.startContainer.nodeType === 3) {
+                        startRange = r;
+                    }
+                }
+            }
+            if (!startRange) return '';
+
+            // Create a range from that point to the end of the body
+            var range = document.createRange();
+            range.setStart(startRange.startContainer, startRange.startOffset);
+            range.setEnd(document.body, document.body.childNodes.length);
+            var text = range.toString().trim();
+            return text.substring(0, \(maxLength + 50));
+        })();
+        """
+        let result = await navigator.evaluateJavaScript(js)
+        switch result {
+        case .success(let value):
+            if let text = value as? String {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                guard !trimmed.isEmpty else { return nil }
+                if trimmed.count <= maxLength { return trimmed }
+                let truncated = String(trimmed.prefix(maxLength))
+                if let lastSpace = truncated.lastIndex(of: " ") {
+                    return String(truncated[..<lastSpace]) + "\u{2026}"
+                }
+                return truncated + "\u{2026}"
+            }
+            return nil
+        case .failure:
+            return nil
+        }
     }
 
     func goToProgression(_ progression: Double) async {
@@ -459,6 +1182,34 @@ public class EPUBReaderViewModel: ObservableObject {
     }
 }
 
+// MARK: - Navigator Container VC
+/// A thin parent view controller that sits above `EPUBNavigatorViewController`
+/// in the responder chain.  Readium routes custom `EditingAction` selectors up
+/// the responder chain, so the "Highlight" menu item must be handled by a
+/// UIViewController — not by an NSObject Coordinator.
+public class EPUBNavigatorContainerViewController: UIViewController {
+    var navigator: EPUBNavigatorViewController?
+    var onHighlightCreated: ((EPUBHighlight) -> Void)?
+
+    /// Selector target for the "Highlight" editing action.
+    @objc func highlightSelection() {
+        guard let navigator = navigator,
+              let selection = navigator.currentSelection else { return }
+
+        let highlight = EPUBHighlight(locator: selection.locator)
+        onHighlightCreated?(highlight)
+        navigator.clearSelection()
+    }
+
+    /// Forward `canPerformAction` so the "Highlight" item appears in the menu.
+    override public func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(highlightSelection) {
+            return navigator?.currentSelection != nil && onHighlightCreated != nil
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+}
+
 // MARK: - Navigator Wrapper
 public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
     let publication: Publication
@@ -466,12 +1217,32 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
     let initialLocator: Locator?
     @Binding var fontSize: Double
     @Binding var currentLocator: Locator?
+
+    // Highlight support
+    @Binding var highlights: [EPUBHighlight]
+    var onHighlightCreated: ((EPUBHighlight) -> Void)?
+    var onHighlightTapped: ((EPUBHighlightTapEvent) -> Void)?
+
     @ObservedObject var viewModel: EPUBReaderViewModel
     var onTap: (() -> Void)?
 
-    public func makeUIViewController(context: Context) -> EPUBNavigatorViewController {
-        let config = EPUBNavigatorViewController.Configuration()
-        
+    /// The decoration group name used for user highlights.
+    private static let highlightGroup = "user-highlights"
+
+    public func makeUIViewController(context: Context) -> EPUBNavigatorContainerViewController {
+        let container = EPUBNavigatorContainerViewController()
+        container.onHighlightCreated = onHighlightCreated
+
+        // Add "Highlight" editing action only when the caller opted-in.
+        var editingActions = EditingAction.defaultActions
+        if onHighlightCreated != nil {
+            editingActions.append(
+                EditingAction(title: "Highlight", action: #selector(EPUBNavigatorContainerViewController.highlightSelection))
+            )
+        }
+
+        let config = EPUBNavigatorViewController.Configuration(editingActions: editingActions)
+
         guard let navigator = try? EPUBNavigatorViewController(
             publication: publication,
             initialLocation: initialLocator,
@@ -481,16 +1252,32 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
             fatalError("Failed to initialize EPUBNavigatorViewController")
         }
 
+        // Embed navigator as a child of the container
+        container.addChild(navigator)
+        container.view.addSubview(navigator.view)
+        navigator.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            navigator.view.topAnchor.constraint(equalTo: container.view.topAnchor),
+            navigator.view.bottomAnchor.constraint(equalTo: container.view.bottomAnchor),
+            navigator.view.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
+            navigator.view.trailingAnchor.constraint(equalTo: container.view.trailingAnchor),
+        ])
+        navigator.didMove(toParent: container)
+        container.navigator = navigator
+
         context.coordinator.parent = self
-        
+
         // Set delegate BEFORE navigator is returned and can start loading
         navigator.delegate = context.coordinator
         viewModel.setNavigator(navigator)
-        
+
+        // Keep a reference so the Coordinator can call navigator APIs
+        context.coordinator.navigator = navigator
+
         // Apply initial font size synchronously before first render
         let prefs = EPUBPreferences(fontSize: fontSize)
         navigator.submitPreferences(prefs)
-        
+
         // Add tap gesture
         let tapGesture = UITapGestureRecognizer(
             target: context.coordinator,
@@ -499,30 +1286,54 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
         tapGesture.delegate = context.coordinator
         navigator.view.addGestureRecognizer(tapGesture)
 
-        return navigator
+        // Apply initial decorations for any pre-existing highlights
+        let decorations = highlights.map { $0.toDecoration() }
+        navigator.apply(decorations: decorations, in: Self.highlightGroup)
+        context.coordinator.lastHighlights = highlights
+
+        // Observe taps on highlight decorations (only when a tap handler exists)
+        if onHighlightTapped != nil {
+            navigator.observeDecorationInteractions(inGroup: Self.highlightGroup) { event in
+                // Suppress the overlay toggle for this tap
+                context.coordinator.suppressNextTap = true
+                guard let tapped = context.coordinator.parent.highlights.first(where: { $0.id == event.decoration.id }) else { return }
+                context.coordinator.parent.onHighlightTapped?(
+                    EPUBHighlightTapEvent(highlight: tapped, rect: event.rect)
+                )
+            }
+        }
+
+        return container
     }
 
-    public func updateUIViewController(_ navigator: EPUBNavigatorViewController, context: Context) {
+    public func updateUIViewController(_ container: EPUBNavigatorContainerViewController, context: Context) {
         context.coordinator.parent = self
-        
-        // Only update if fontSize actually changed
+        container.onHighlightCreated = onHighlightCreated
+
+        guard let navigator = container.navigator else { return }
+
+        // --- Font size ---
         if context.coordinator.lastFontSize != fontSize {
             context.coordinator.lastFontSize = fontSize
-            
+
             Task { @MainActor in
-                // Get current locator before changing preferences
                 let currentLoc = navigator.currentLocation
-                
-                // Apply new preferences
+
                 let prefs = EPUBPreferences(fontSize: fontSize)
                 navigator.submitPreferences(prefs)
-                
-                // Navigate back to the same location to maintain reading position
+
                 if let loc = currentLoc {
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s delay for layout
+                    try? await Task.sleep(nanoseconds: 100_000_000)
                     await navigator.go(to: loc)
                 }
             }
+        }
+
+        // --- Highlights (re-apply decorations when anything changes: add/remove, color, style) ---
+        if highlights != context.coordinator.lastHighlights {
+            context.coordinator.lastHighlights = highlights
+            let decorations = highlights.map { $0.toDecoration() }
+            navigator.apply(decorations: decorations, in: Self.highlightGroup)
         }
     }
 
@@ -533,6 +1344,13 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
     public class Coordinator: NSObject, EPUBNavigatorDelegate, UIGestureRecognizerDelegate {
         var parent: EPUBNavigatorWrapper
         var lastFontSize: Double
+        /// Tracks the last applied highlights so we re-apply when anything changes (color, style, etc.).
+        var lastHighlights: [EPUBHighlight] = []
+        /// Weak reference to the navigator for creating highlights from selection.
+        weak var navigator: EPUBNavigatorViewController?
+        /// Set to `true` when a highlight decoration tap fires, so the
+        /// simultaneous UITapGestureRecognizer doesn't toggle the overlay.
+        var suppressNextTap = false
 
         init(_ parent: EPUBNavigatorWrapper) {
             self.parent = parent
@@ -540,12 +1358,31 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
         }
 
         @objc func handleTap() {
-            parent.onTap?()
+            // Don't toggle overlay while the user has text selected
+            // (e.g. the "Highlight" menu is showing).
+            if navigator?.currentSelection != nil {
+                return
+            }
+            // Delay slightly so the decoration-interaction callback
+            // (which arrives asynchronously from Readium's JS bridge)
+            // has time to set `suppressNextTap` before we check it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                guard let self = self else { return }
+                if self.suppressNextTap {
+                    self.suppressNextTap = false
+                    return
+                }
+                self.parent.onTap?()
+            }
         }
+
+        // MARK: - UIGestureRecognizerDelegate
 
         public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
             return true
         }
+
+        // MARK: - EPUBNavigatorDelegate
 
         public func navigator(_ navigator: Navigator, locationDidChange locator: Locator) {
             parent.currentLocator = locator
@@ -622,6 +1459,111 @@ public struct DefaultEPUBReaderTOCView: View {
 
 /// Backward-compatible alias.
 public typealias TableOfContentsView = DefaultEPUBReaderTOCView
+
+// MARK: - Default Bookmark List View
+/// Built-in sheet for viewing, navigating to, and deleting bookmarks.
+public struct DefaultBookmarkListView: View {
+    let bookmarks: [EPUBBookmark]
+    let onNavigate: (EPUBBookmark) -> Void
+    let onDelete: (String) -> Void
+    let onDismiss: () -> Void
+
+    public init(
+        bookmarks: [EPUBBookmark],
+        onNavigate: @escaping (EPUBBookmark) -> Void,
+        onDelete: @escaping (String) -> Void,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.bookmarks = bookmarks
+        self.onNavigate = onNavigate
+        self.onDelete = onDelete
+        self.onDismiss = onDismiss
+    }
+
+    public var body: some View {
+        NavigationView {
+            Group {
+                if bookmarks.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "bookmark")
+                            .font(.largeTitle)
+                            .foregroundStyle(.tertiary)
+                        Text("No bookmarks yet")
+                            .foregroundStyle(.secondary)
+                        Text("Tap the bookmark icon while reading to save your place.")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 40)
+                    }
+                } else {
+                    List {
+                        ForEach(bookmarks) { bookmark in
+                            Button {
+                                onNavigate(bookmark)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "bookmark.fill")
+                                        .foregroundColor(.accentColor)
+                                        .font(.body)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(bookmark.displayTitle)
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+
+                                    if let preview = bookmark.textPreview, !preview.isEmpty,
+                                       preview != bookmark.chapterTitle {
+                                        Text(preview)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                            .multilineTextAlignment(.leading)
+                                    }
+
+                                    HStack(spacing: 8) {
+                                        if let prog = bookmark.progression {
+                                                Text("\(Int(prog * 100))%")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.tertiary)
+                                            }
+
+                                            Text(bookmark.createdAt, style: .date)
+                                                .font(.caption2)
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+
+                                    Spacer()
+
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2)
+                                        .foregroundStyle(.quaternary)
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        }
+                        .onDelete { offsets in
+                            for idx in offsets {
+                                onDelete(bookmarks[idx].id)
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("Bookmarks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { onDismiss() }
+                }
+            }
+        }
+    }
+}
 
 public class EPUBDownloader {
     public enum DownloadError: Error {
