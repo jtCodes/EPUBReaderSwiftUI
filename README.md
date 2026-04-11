@@ -13,13 +13,15 @@ It supports the essential EPUB workflow: file selection, unpacking, and renderin
 
 ## ✅ Features
 
-- SwiftUI view (`EPUBReaderSwiftUI`) that can be integrated into your view hierarchy.  
-- Supports loading local EPUB files via URL.  
-- Renders content via WKWebView (or equivalent) inside SwiftUI.  
-- Navigation across chapters, table of contents support.  
-- Customisation points: theming, font size, paging/navigation.  
-- Bookmark / reading‑progress support (if implemented).  
-- Compatibility with modern Swift / SwiftUI toolchain.
+- Drop-in SwiftUI view (`EPUBReaderView`) — works with `.sheet`, `.fullScreenCover`, or inline.
+- **Local & remote** EPUB loading — pass a file URL, a remote URL string, or an `EPUBSource` enum. Remote files are downloaded and cached automatically.
+- **Customizable overlay** — replace the default reader chrome (toolbar, progress bar, font controls) with your own SwiftUI view via an `overlay:` closure.
+- **Customizable table of contents** — supply a `tocView:` closure to build your own TOC UI, or use the built-in `DefaultEPUBReaderTOCView`.
+- Reading position persistence — save and restore the locator across sessions.
+- Font-size control via `EPUBReaderSwiftUIPreferences`.
+- Navigation across chapters, progress tracking.
+- Renders content via WKWebView (Readium) inside SwiftUI.
+- No need to `import ReadiumShared` — common types (`Locator`, `Link`) are re-exported.
 
 ## 🧭 Getting Started
 
@@ -34,54 +36,56 @@ Alternatively, integrate manually by copying the `Sources/EPUBReaderSwiftUI` fol
 
 ### Usage
 
+> **Note:** `ReadiumShared` is re-exported automatically — you only need `import EPUBReaderSwiftUI`.
+
+#### ① Remote URL (simplest)
+
+Pass a URL string directly. The package downloads, caches, and opens the file for you.
+
 ```swift
 import SwiftUI
 import EPUBReaderSwiftUI
-import ReadiumShared
 
-struct ContentView: View {
+struct RemoteURLExample: View {
     @State private var showReader = false
-    @State private var savedLocator: Locator?
-    @State private var savedPreferences = ReadingPreferences()
-    @State private var epubURL: URL?
-    @State private var isDownloading = false
-    @State private var errorMessage: String?
+    @State private var savedLocator: EPUBReaderSwiftUILocator?
+    @State private var savedPreferences = EPUBReaderSwiftUIPreferences()
 
     var body: some View {
-        VStack {
-            if isDownloading {
-                ProgressView("Downloading EPUB...")
-            } else {
-                Button("Open EPUB") {
-                    Task {
-                        isDownloading = true
-                        errorMessage = nil
-                        
-                        do {
-                            // Option 1: Download from URL
-                            epubURL = try await EPUBDownloader.downloadEPUB(from: "https://www.gutenberg.org/ebooks/9662.epub3.images")
-                            
-                            // Option 2: Or use local file
-                            // epubURL = Bundle.main.url(forResource: "republic", withExtension: "epub")
-                            
-                            showReader = true
-                        } catch {
-                            errorMessage = "Failed to load EPUB: \(error.localizedDescription)"
-                        }
-                        
-                        isDownloading = false
-                    }
-                }
-                
-                if let errorMessage = errorMessage {
-                    Text(errorMessage)
-                        .foregroundColor(.red)
-                        .padding()
-                }
-            }
+        Button("Open Remote EPUB") {
+            showReader = true
         }
         .fullScreenCover(isPresented: $showReader) {
-            if let url = epubURL {
+            EPUBReaderView(
+                remoteURL: "https://www.gutenberg.org/ebooks/9662.epub3.images",
+                initialLocator: savedLocator,
+                initialPreferences: savedPreferences
+            ) { locator, preferences in
+                savedLocator = locator
+                savedPreferences = preferences
+                showReader = false
+            }
+        }
+    }
+}
+```
+
+#### ② Local file URL
+
+Load an `.epub` that's already on disk or in your app bundle.
+
+```swift
+struct LocalFileExample: View {
+    @State private var showReader = false
+    @State private var savedLocator: EPUBReaderSwiftUILocator?
+    @State private var savedPreferences = EPUBReaderSwiftUIPreferences()
+
+    var body: some View {
+        Button("Open Local EPUB") {
+            showReader = true
+        }
+        .fullScreenCover(isPresented: $showReader) {
+            if let url = Bundle.main.url(forResource: "republic", withExtension: "epub") {
                 EPUBReaderView(
                     url: url,
                     initialLocator: savedLocator,
@@ -97,10 +101,145 @@ struct ContentView: View {
 }
 ```
 
+#### ③ EPUBSource enum (choose at runtime)
+
+Use the `EPUBSource` enum when you need to decide between local and remote at runtime.
+
+```swift
+struct SourceEnumExample: View {
+    @State private var showReader = false
+    @State private var savedLocator: EPUBReaderSwiftUILocator?
+    @State private var savedPreferences = EPUBReaderSwiftUIPreferences()
+
+    let source: EPUBSource = .remoteURL(
+        "https://www.gutenberg.org/ebooks/9662.epub3.images",
+        useCache: true
+    )
+    // Or: let source: EPUBSource = .fileURL(Bundle.main.url(forResource: "republic", withExtension: "epub")!)
+
+    var body: some View {
+        Button("Open EPUB") {
+            showReader = true
+        }
+        .fullScreenCover(isPresented: $showReader) {
+            EPUBReaderView(
+                source: source,
+                initialLocator: savedLocator,
+                initialPreferences: savedPreferences
+            ) { locator, preferences in
+                savedLocator = locator
+                savedPreferences = preferences
+                showReader = false
+            }
+        }
+    }
+}
+```
+
 ### Customisation
 
-You can configure reader options (font size, theme) via `EPUBReaderViewConfiguration` (if provided).  
-You can also observe reading progress or chapter changes via published properties / delegate callbacks.
+#### Custom Overlay
+
+Supply an `overlay` closure to replace the default reader chrome. You receive an `EPUBReaderOverlayContext` with all the state and actions you need (title, author, current locator, font-size binding, close/navigate callbacks, etc.).
+
+```swift
+struct CustomOverlayExample: View {
+    @State private var showReader = false
+    @State private var savedLocator: EPUBReaderSwiftUILocator?
+    @State private var savedPreferences = EPUBReaderSwiftUIPreferences()
+
+    var body: some View {
+        Button("Open with Custom Overlay") {
+            showReader = true
+        }
+        .fullScreenCover(isPresented: $showReader) {
+            EPUBReaderView(
+                remoteURL: "https://www.gutenberg.org/ebooks/9662.epub3.images",
+                initialLocator: savedLocator,
+                initialPreferences: savedPreferences
+            ) { locator, preferences in
+                savedLocator = locator
+                savedPreferences = preferences
+                showReader = false
+            } overlay: { context in
+                // Build any SwiftUI overlay you want.
+                // 'context' exposes: .title, .author, .chapterTitle,
+                // .totalProgression, .showControls, .fontSize,
+                // .close(), .showTableOfContents(), .goToProgression(_:)
+                VStack {
+                    if context.showControls {
+                        HStack {
+                            Button(action: context.close) {
+                                Image(systemName: "chevron.left")
+                                Text("Library")
+                            }
+                            Spacer()
+                            Button(action: context.showTableOfContents) {
+                                Image(systemName: "list.bullet")
+                            }
+                        }
+                        .padding()
+                        .background(.ultraThinMaterial)
+                    }
+                    Spacer()
+                }
+            }
+        }
+    }
+}
+```
+
+#### Custom Table of Contents
+
+Supply a `tocView` closure to replace the default TOC sheet. You receive an `EPUBReaderTOCContext` with the chapter list, current locator, and navigation/dismiss actions.
+
+```swift
+struct CustomTOCExample: View {
+    @State private var showReader = false
+    @State private var savedLocator: EPUBReaderSwiftUILocator?
+    @State private var savedPreferences = EPUBReaderSwiftUIPreferences()
+
+    var body: some View {
+        Button("Open with Custom TOC") {
+            showReader = true
+        }
+        .fullScreenCover(isPresented: $showReader) {
+            EPUBReaderView(
+                remoteURL: "https://www.gutenberg.org/ebooks/9662.epub3.images",
+                initialLocator: savedLocator,
+                initialPreferences: savedPreferences
+            ) { locator, preferences in
+                savedLocator = locator
+                savedPreferences = preferences
+                showReader = false
+            } overlay: { context in
+                // Keep the default overlay, only customize the TOC
+                DefaultEPUBReaderOverlay(context: context)
+            } tocView: { context in
+                // 'context' exposes: .tableOfContents, .currentLocator,
+                // .navigateToLink(_:), .dismiss()
+                NavigationView {
+                    List(context.tableOfContents, id: \.href) { link in
+                        Button {
+                            context.navigateToLink(link)
+                        } label: {
+                            Text(link.title ?? "Untitled")
+                        }
+                    }
+                    .navigationTitle("Chapters")
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button("Close") { context.dismiss() }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+> **Tip:** You can customize just the overlay, just the TOC, or both. Omit either closure to keep the default.
 
 ## 🔧 How it works (at a high level)
 
