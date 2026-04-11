@@ -7,6 +7,10 @@ import Combine
 @preconcurrency import ReadiumStreamer
 import ReadiumAdapterGCDWebServer
 
+// MARK: - Public Type Aliases
+/// Re-exported so users don't need `import ReadiumShared` for basic usage.
+public typealias EPUBReaderSwiftUILocator = Locator
+
 // MARK: - EPUB Source
 public enum EPUBSource {
     /// A local file URL pointing to an .epub file already on disk.
@@ -19,8 +23,8 @@ public enum EPUBSource {
 public struct EPUBReaderView: View {
     let source: EPUBSource
     let initialLocator: Locator?
-    let initialPreferences: ReadingPreferences
-    let onClose: (Locator?, ReadingPreferences) -> Void
+    let initialPreferences: EPUBReaderSwiftUIPreferences
+    let onClose: (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void
 
     @MainActor @StateObject private var viewModel = EPUBReaderViewModel()
     @State private var fontSize: Double
@@ -29,7 +33,7 @@ public struct EPUBReaderView: View {
     @State private var currentLocator: Locator?
 
     /// Initialize with an `EPUBSource` (local file or remote URL).
-    public init(source: EPUBSource, initialLocator: Locator? = nil, initialPreferences: ReadingPreferences = ReadingPreferences(), onClose: @escaping (Locator?, ReadingPreferences) -> Void) {
+    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
         self.source = source
         self.initialLocator = initialLocator
         self.initialPreferences = initialPreferences
@@ -38,12 +42,12 @@ public struct EPUBReaderView: View {
     }
 
     /// Convenience: open a remote EPUB by URL string. Downloads and caches automatically.
-    public init(remoteURL: String, useCache: Bool = true, initialLocator: Locator? = nil, initialPreferences: ReadingPreferences = ReadingPreferences(), onClose: @escaping (Locator?, ReadingPreferences) -> Void) {
+    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
         self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose)
     }
 
     /// Convenience: open a local EPUB file URL (backwards-compatible).
-    public init(url: URL, initialLocator: Locator? = nil, initialPreferences: ReadingPreferences = ReadingPreferences(), onClose: @escaping (Locator?, ReadingPreferences) -> Void) {
+    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
         self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose)
     }
 
@@ -57,7 +61,7 @@ public struct EPUBReaderView: View {
                     ProgressView(viewModel.loadingMessage)
                     
                     Button(action: {
-                        onClose(nil, ReadingPreferences(fontSize: fontSize))
+                        onClose(nil, EPUBReaderSwiftUIPreferences(fontSize: fontSize))
                     }) {
                         Text("Cancel")
                             .font(.headline)
@@ -82,7 +86,7 @@ public struct EPUBReaderView: View {
                         .padding()
 
                     Button(action: {
-                        onClose(nil, ReadingPreferences(fontSize: fontSize))
+                        onClose(nil, EPUBReaderSwiftUIPreferences(fontSize: fontSize))
                     }) {
                         Text("Close")
                             .font(.headline)
@@ -150,7 +154,7 @@ public struct EPUBReaderView: View {
         VStack(spacing: 12) {
             HStack {
                 Button(action: {
-                    let preferences = ReadingPreferences(fontSize: fontSize)
+                    let preferences = EPUBReaderSwiftUIPreferences(fontSize: fontSize)
                     onClose(currentLocator, preferences)
                 }) {
                     Image(systemName: "xmark")
@@ -434,7 +438,7 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
     }
 }
 
-public struct ReadingPreferences: Codable {
+public struct EPUBReaderSwiftUIPreferences: Codable {
     public var fontSize: Double = 1.0
     // Add more preferences as needed (font family, theme, etc.)
     
@@ -442,6 +446,9 @@ public struct ReadingPreferences: Codable {
         self.fontSize = fontSize
     }
 }
+
+/// Backward-compatible alias.
+public typealias ReadingPreferences = EPUBReaderSwiftUIPreferences
 
 // MARK: - Table of Contents
 public struct TableOfContentsView: View {
