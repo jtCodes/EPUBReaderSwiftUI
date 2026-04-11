@@ -18,6 +18,7 @@ It supports the essential EPUB workflow: file selection, unpacking, and renderin
 - **Customizable overlay** — replace the default reader chrome (toolbar, progress bar, font controls) with your own SwiftUI view via an `overlay:` closure.
 - **Customizable table of contents** — supply a `tocView:` closure to build your own TOC UI, or use the built-in `DefaultEPUBReaderTOCView`.
 - **Highlighting & notes** — select text to highlight, tap highlights to edit color/style, add notes, or delete. Built-in default UI or fully custom via callbacks.
+- **Bookmarks** — toggle bookmarks from the overlay; the default overlay includes a bookmark button out of the box. Your app owns the array and persists it.
 - Reading position persistence — save and restore the locator across sessions.
 - Font-size control via `EPUBReaderSwiftUIPreferences`.
 - Navigation across chapters, progress tracking.
@@ -313,6 +314,66 @@ EPUBReaderView(
 
 `EPUBHighlight` conforms to `Codable`, `Identifiable`, `Equatable`, and `Hashable`, so you can serialize it directly with `JSONEncoder`/`JSONDecoder`.
 
+#### Bookmarks
+
+Pass a `bookmarks` binding and the default overlay will show a bookmark toggle button (filled when the current chapter is bookmarked). No extra callbacks needed — the library handles add/remove automatically via `EPUBReaderOverlayContext.toggleBookmark`.
+
+##### Minimal example
+
+```swift
+struct BookmarkExample: View {
+    @State private var showReader = false
+    @State private var savedLocator: EPUBReaderSwiftUILocator?
+    @State private var savedPreferences = EPUBReaderSwiftUIPreferences()
+    @State private var bookmarks: [EPUBBookmark] = []
+
+    var body: some View {
+        Button("Open Reader") { showReader = true }
+        .fullScreenCover(isPresented: $showReader) {
+            EPUBReaderView(
+                remoteURL: "https://www.gutenberg.org/ebooks/1497.epub3.images",
+                initialLocator: savedLocator,
+                initialPreferences: savedPreferences,
+                bookmarks: $bookmarks,
+                onClose: { locator, preferences in
+                    savedLocator = locator
+                    savedPreferences = preferences
+                    showReader = false
+                }
+            )
+        }
+    }
+}
+```
+
+##### Custom overlay with bookmarks
+
+In custom overlays, use the bookmark properties on `EPUBReaderOverlayContext`:
+
+```swift
+// Inside your custom overlay:
+Button(action: context.toggleBookmark) {
+    Image(systemName: context.isCurrentPageBookmarked ? "bookmark.fill" : "bookmark")
+}
+
+// List all bookmarks:
+ForEach(context.bookmarks) { bookmark in
+    Text(bookmark.chapterTitle ?? "Unknown")
+}
+```
+
+##### EPUBBookmark
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | `String` | Unique identifier (UUID by default). |
+| `locator` | `Locator` | Readium locator — position in the book. |
+| `createdAt` | `Date` | When the bookmark was created. |
+| `chapterTitle` | `String?` | Chapter title (read-only, from the locator). |
+| `progression` | `Double?` | Overall reading progression 0.0–1.0 (read-only). |
+
+`EPUBBookmark` conforms to `Codable`, `Identifiable`, `Equatable`, and `Hashable`.
+
 ## 🔧 How it works (at a high level)
 
 1. The EPUB file is unzipped into a temporary directory.  
@@ -332,7 +393,7 @@ EPUBReaderView(
 
 - Does **not** support advanced EPUB features such as media overlays (audio syncing), fixed‑layout books, or interactive content (unless explicitly added).  
 - Performance may degrade for very large books or very high font sizes — advisable to test on real devices.  
-- Bookmarks and annotations beyond highlights are not included out-of-the-box (you may need to extend).  
+- Annotations beyond highlights and bookmarks are not included out-of-the-box (you may need to extend).  
 - SwiftUI integration means there may be some bridging to UIKit/WebKit under the hood.
 
 ## 📖 License
