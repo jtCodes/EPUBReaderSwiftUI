@@ -130,6 +130,102 @@ public struct EPUBHighlightTapEvent {
     public let rect: CGRect?
 }
 
+// MARK: - Default Highlight Edit Sheet
+/// Built-in sheet for editing or deleting a highlight (color, style, delete).
+/// Shown automatically when the user taps a highlight and no custom
+/// `onHighlightTapped` handler is provided.
+public struct DefaultHighlightEditSheet: View {
+    let highlight: EPUBHighlight
+    let onChangeColor: (EPUBHighlightColor) -> Void
+    let onToggleStyle: () -> Void
+    let onDelete: () -> Void
+    let onDismiss: () -> Void
+
+    public init(
+        highlight: EPUBHighlight,
+        onChangeColor: @escaping (EPUBHighlightColor) -> Void,
+        onToggleStyle: @escaping () -> Void,
+        onDelete: @escaping () -> Void,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.highlight = highlight
+        self.onChangeColor = onChangeColor
+        self.onToggleStyle = onToggleStyle
+        self.onDelete = onDelete
+        self.onDismiss = onDismiss
+    }
+
+    public var body: some View {
+        VStack(spacing: 20) {
+            // Header
+            HStack {
+                Text("Edit Highlight")
+                    .font(.headline)
+                Spacer()
+                Button("Done", action: onDismiss)
+            }
+
+            // Highlighted text preview
+            if let text = highlight.highlightText {
+                Text("\u{201C}\(text)\u{201D}")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            // Color picker row
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Color")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    ForEach(EPUBHighlightColor.allCases, id: \.self) { color in
+                        Button {
+                            onChangeColor(color)
+                        } label: {
+                            Circle()
+                                .fill(Color(color.uiColor))
+                                .frame(width: 32, height: 32)
+                                .overlay(
+                                    Circle()
+                                        .strokeBorder(Color.primary, lineWidth: highlight.color == color ? 2.5 : 0)
+                                )
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 16) {
+                // Toggle style
+                Button {
+                    onToggleStyle()
+                } label: {
+                    Label(
+                        highlight.style == .highlight ? "Switch to Underline" : "Switch to Highlight",
+                        systemImage: highlight.style == .highlight ? "underline" : "highlighter"
+                    )
+                    .font(.subheadline)
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
+
+                // Delete
+                Button(role: .destructive) {
+                    onDelete()
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .font(.subheadline)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding()
+    }
+}
+
 // MARK: - TOC Context
 /// All the state and actions available to a custom table of contents view.
 public struct EPUBReaderTOCContext {
@@ -299,6 +395,11 @@ public struct EPUBReaderView<Overlay: View, TOCView: View>: View {
     @State private var showTOC = false
     @State private var currentLocator: Locator?
 
+    // Internal state for the built-in highlight popover
+    @State private var editingHighlight: EPUBHighlight?
+    @State private var showHighlightPopover = false
+    @State private var highlightPopoverAnchor: CGPoint = .zero
+
     /// Initialize with an `EPUBSource`, a custom overlay, and a custom TOC view.
     public init(
         source: EPUBSource,
@@ -449,6 +550,66 @@ extension EPUBReaderView {
                 dismiss: { showTOC = false }
             ))
         }
+        // Built-in highlight popover anchored near the tapped highlight
+        .overlay(
+            Color.clear
+                .frame(width: 1, height: 1)
+                .position(highlightPopoverAnchor)
+                .popover(isPresented: $showHighlightPopover) {
+                    if let hl = editingHighlight {
+                        DefaultHighlightEditSheet(
+                            highlight: hl,
+                            onChangeColor: { newColor in
+                                if let idx = highlights.firstIndex(where: { $0.id == hl.id }) {
+                                    highlights[idx].color = newColor
+                                }
+                                showHighlightPopover = false
+                            },
+                            onToggleStyle: {
+                                if let idx = highlights.firstIndex(where: { $0.id == hl.id }) {
+                                    highlights[idx].style = highlights[idx].style == .highlight ? .underline : .highlight
+                                }
+                                showHighlightPopover = false
+                            },
+                            onDelete: {
+                                highlights.removeAll { $0.id == hl.id }
+                                showHighlightPopover = false
+                            },
+                            onDismiss: {
+                                showHighlightPopover = false
+                            }
+                        )
+                        .frame(width: 320)
+                    }
+                }
+        )
+    }
+
+    /// The effective `onHighlightCreated` handler: uses the consumer's
+    /// callback if provided, otherwise falls back to appending to the
+    /// highlights binding automatically.  Returns nil when the consumer
+    /// has not opted-in to highlighting at all.
+    private var resolvedOnHighlightCreated: ((EPUBHighlight) -> Void)? {
+        onHighlightCreated
+    }
+
+    /// The effective `onHighlightTapped` handler: uses the consumer's
+    /// callback if provided, otherwise falls back to showing the built-in
+    /// popover — but only when highlighting is enabled.
+    private var resolvedOnHighlightTapped: ((EPUBHighlightTapEvent) -> Void)? {
+        if onHighlightTapped != nil { return onHighlightTapped }
+        // Show the default edit popover only if the caller opted-in to highlighting.
+        guard onHighlightCreated != nil else { return nil }
+        return { event in
+            editingHighlight = event.highlight
+            // Position the popover anchor at the top-center of the highlight rect
+            if let rect = event.rect {
+                highlightPopoverAnchor = CGPoint(x: rect.midX, y: rect.minY)
+            } else {
+                highlightPopoverAnchor = CGPoint(x: UIScreen.main.bounds.midX, y: UIScreen.main.bounds.midY)
+            }
+            showHighlightPopover = true
+        }
     }
 
     private func readerContent(publication: Publication) -> some View {
@@ -460,8 +621,8 @@ extension EPUBReaderView {
                 fontSize: $fontSize,
                 currentLocator: $currentLocator,
                 highlights: $highlights,
-                onHighlightCreated: onHighlightCreated,
-                onHighlightTapped: onHighlightTapped,
+                onHighlightCreated: resolvedOnHighlightCreated,
+                onHighlightTapped: resolvedOnHighlightTapped,
                 viewModel: viewModel,
                 onTap: {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -665,8 +826,7 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
         let container = EPUBNavigatorContainerViewController()
         container.onHighlightCreated = onHighlightCreated
 
-        // Build editing actions — add a "Highlight" item when the consumer
-        // provided an `onHighlightCreated` callback.
+        // Add "Highlight" editing action only when the caller opted-in.
         var editingActions = EditingAction.defaultActions
         if onHighlightCreated != nil {
             editingActions.append(
@@ -722,9 +882,9 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
         // Apply initial decorations for any pre-existing highlights
         let decorations = highlights.map { $0.toDecoration() }
         navigator.apply(decorations: decorations, in: Self.highlightGroup)
-        context.coordinator.lastHighlightIDs = Set(highlights.map(\.id))
+        context.coordinator.lastHighlights = highlights
 
-        // Observe taps on highlight decorations
+        // Observe taps on highlight decorations (only when a tap handler exists)
         if onHighlightTapped != nil {
             navigator.observeDecorationInteractions(inGroup: Self.highlightGroup) { event in
                 guard let tapped = context.coordinator.parent.highlights.first(where: { $0.id == event.decoration.id }) else { return }
@@ -760,10 +920,9 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
             }
         }
 
-        // --- Highlights (re-apply decorations when the binding changes) ---
-        let currentIDs = Set(highlights.map(\.id))
-        if currentIDs != context.coordinator.lastHighlightIDs {
-            context.coordinator.lastHighlightIDs = currentIDs
+        // --- Highlights (re-apply decorations when anything changes: add/remove, color, style) ---
+        if highlights != context.coordinator.lastHighlights {
+            context.coordinator.lastHighlights = highlights
             let decorations = highlights.map { $0.toDecoration() }
             navigator.apply(decorations: decorations, in: Self.highlightGroup)
         }
@@ -776,8 +935,8 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
     public class Coordinator: NSObject, EPUBNavigatorDelegate, UIGestureRecognizerDelegate {
         var parent: EPUBNavigatorWrapper
         var lastFontSize: Double
-        /// Tracks which highlight IDs have been applied so we only re-apply on change.
-        var lastHighlightIDs: Set<String> = []
+        /// Tracks the last applied highlights so we re-apply when anything changes (color, style, etc.).
+        var lastHighlights: [EPUBHighlight] = []
         /// Weak reference to the navigator for creating highlights from selection.
         weak var navigator: EPUBNavigatorViewController?
 
