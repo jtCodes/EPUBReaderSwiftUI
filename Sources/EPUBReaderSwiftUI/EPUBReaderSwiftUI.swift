@@ -2,7 +2,7 @@
 // https://docs.swift.org/swift-book
 import SwiftUI
 import Combine
-@preconcurrency import ReadiumShared
+@_exported @preconcurrency import ReadiumShared
 @preconcurrency import ReadiumNavigator
 @preconcurrency import ReadiumStreamer
 import ReadiumAdapterGCDWebServer
@@ -10,6 +10,20 @@ import ReadiumAdapterGCDWebServer
 // MARK: - Public Type Aliases
 /// Re-exported so users don't need `import ReadiumShared` for basic usage.
 public typealias EPUBReaderSwiftUILocator = Locator
+public typealias EPUBReaderSwiftUILink = ReadiumShared.Link
+
+// MARK: - TOC Context
+/// All the state and actions available to a custom table of contents view.
+public struct EPUBReaderTOCContext {
+    /// The flat list of TOC entries. Each entry may have `.children`.
+    public let tableOfContents: [EPUBReaderSwiftUILink]
+    /// The reader's current locator (href, title, progression, etc.).
+    public let currentLocator: EPUBReaderSwiftUILocator?
+    /// Call this with a TOC link to navigate to it.
+    public let navigateToLink: (EPUBReaderSwiftUILink) -> Void
+    /// Dismiss the TOC sheet.
+    public let dismiss: () -> Void
+}
 
 // MARK: - EPUB Source
 public enum EPUBSource {
@@ -148,12 +162,13 @@ public struct DefaultEPUBReaderOverlay: View {
 }
 
 // MARK: - EPUBReaderView
-public struct EPUBReaderView<Overlay: View>: View {
+public struct EPUBReaderView<Overlay: View, TOCView: View>: View {
     let source: EPUBSource
     let initialLocator: Locator?
     let initialPreferences: EPUBReaderSwiftUIPreferences
     let onClose: (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void
     let overlay: (EPUBReaderOverlayContext) -> Overlay
+    let tocView: (EPUBReaderTOCContext) -> TOCView
 
     @MainActor @StateObject private var viewModel = EPUBReaderViewModel()
     @State private var fontSize: Double
@@ -161,45 +176,57 @@ public struct EPUBReaderView<Overlay: View>: View {
     @State private var showTOC = false
     @State private var currentLocator: Locator?
 
-    /// Initialize with an `EPUBSource` and a custom overlay.
-    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
+    /// Initialize with an `EPUBSource`, a custom overlay, and a custom TOC view.
+    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
         self.source = source
         self.initialLocator = initialLocator
         self.initialPreferences = initialPreferences
         self.onClose = onClose
         self.overlay = overlay
+        self.tocView = tocView
         _fontSize = State(initialValue: initialPreferences.fontSize)
     }
 
-    /// Convenience: remote URL with custom overlay.
-    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
-        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay)
+    /// Convenience: remote URL with custom overlay and TOC.
+    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
+        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay, tocView: tocView)
     }
 
-    /// Convenience: local file URL with custom overlay.
-    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
-        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay)
+    /// Convenience: local file URL with custom overlay and TOC.
+    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay, @ViewBuilder tocView: @escaping (EPUBReaderTOCContext) -> TOCView) {
+        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay, tocView: tocView)
     }
 }
 
-// MARK: - Default overlay inits (backward-compatible)
-extension EPUBReaderView where Overlay == DefaultEPUBReaderOverlay {
+// MARK: - Default overlay + default TOC inits (fully backward-compatible)
+extension EPUBReaderView where Overlay == DefaultEPUBReaderOverlay, TOCView == DefaultEPUBReaderTOCView {
 
-    /// Initialize with an `EPUBSource` (local file or remote URL). Uses the default overlay.
     public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
-        self.init(source: source, initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose) { context in
-            DefaultEPUBReaderOverlay(context: context)
-        }
+        self.init(source: source, initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: { DefaultEPUBReaderOverlay(context: $0) }, tocView: { DefaultEPUBReaderTOCView(context: $0) })
     }
 
-    /// Convenience: open a remote EPUB by URL string. Downloads and caches automatically. Uses the default overlay.
     public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
         self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose)
     }
 
-    /// Convenience: open a local EPUB file URL (backwards-compatible). Uses the default overlay.
     public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
         self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose)
+    }
+}
+
+// MARK: - Custom overlay + default TOC
+extension EPUBReaderView where TOCView == DefaultEPUBReaderTOCView {
+
+    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
+        self.init(source: source, initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay, tocView: { DefaultEPUBReaderTOCView(context: $0) })
+    }
+
+    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
+        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay)
+    }
+
+    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
+        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay)
     }
 }
 
@@ -260,15 +287,15 @@ extension EPUBReaderView {
             await viewModel.loadEPUB(source: source, initialLocator: initialLocator)
         }
         .sheet(isPresented: $showTOC) {
-            TableOfContentsView(
+            tocView(EPUBReaderTOCContext(
                 tableOfContents: viewModel.tableOfContents,
-                onSelectLink: { link in
-                    Task {
-                        await viewModel.navigateToLink(link)
-                    }
+                currentLocator: currentLocator,
+                navigateToLink: { link in
+                    Task { await viewModel.navigateToLink(link) }
                     showTOC = false
-                }
-            )
+                },
+                dismiss: { showTOC = false }
+            ))
         }
     }
 
@@ -546,28 +573,46 @@ public struct EPUBReaderSwiftUIPreferences: Codable {
 /// Backward-compatible alias.
 public typealias ReadingPreferences = EPUBReaderSwiftUIPreferences
 
-// MARK: - Table of Contents
-public struct TableOfContentsView: View {
-    let tableOfContents: [ReadiumShared.Link]
-    let onSelectLink: (ReadiumShared.Link) -> Void
-    @Environment(\.dismiss) private var dismiss
+// MARK: - Default Table of Contents
+/// The built-in TOC view used when no custom TOC is provided.
+public struct DefaultEPUBReaderTOCView: View {
+    public let context: EPUBReaderTOCContext
+
+    public init(context: EPUBReaderTOCContext) {
+        self.context = context
+    }
 
     public var body: some View {
         NavigationView {
-            if tableOfContents.isEmpty {
+            if context.tableOfContents.isEmpty {
                 Text("No table of contents available")
                     .foregroundColor(.secondary)
             } else {
-                List(tableOfContents, id: \.href) { link in
-                    TOCRow(link: link, onSelectLink: onSelectLink)
+                List(context.tableOfContents, id: \.href) { link in
+                    Button(action: { context.navigateToLink(link) }) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(link.title ?? "Untitled")
+                                .foregroundColor(.primary)
+
+                            if !link.children.isEmpty {
+                                ForEach(link.children, id: \.href) { child in
+                                    Button(action: { context.navigateToLink(child) }) {
+                                        Text(child.title ?? "Untitled")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .padding(.leading, 16)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
                 }
                 .navigationTitle("Table of Contents")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .navigationBarTrailing) {
-                        Button("Done") {
-                            dismiss()
-                        }
+                        Button("Done") { context.dismiss() }
                     }
                 }
             }
@@ -575,31 +620,8 @@ public struct TableOfContentsView: View {
     }
 }
 
-struct TOCRow: View {
-    let link: ReadiumShared.Link
-    let onSelectLink: (ReadiumShared.Link) -> Void
-
-    var body: some View {
-        Button(action: {
-            onSelectLink(link)
-        }) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(link.title ?? "Untitled")
-                    .foregroundColor(.primary)
-
-                if !link.children.isEmpty {
-                    ForEach(link.children, id: \.href) { child in
-                        Text(child.title ?? "Untitled")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 16)
-                    }
-                }
-            }
-            .padding(.vertical, 4)
-        }
-    }
-}
+/// Backward-compatible alias.
+public typealias TableOfContentsView = DefaultEPUBReaderTOCView
 
 public class EPUBDownloader {
     public enum DownloadError: Error {
