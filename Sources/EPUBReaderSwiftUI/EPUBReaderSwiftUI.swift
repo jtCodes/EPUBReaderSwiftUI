@@ -932,6 +932,8 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
         // Observe taps on highlight decorations (only when a tap handler exists)
         if onHighlightTapped != nil {
             navigator.observeDecorationInteractions(inGroup: Self.highlightGroup) { event in
+                // Suppress the overlay toggle for this tap
+                context.coordinator.suppressNextTap = true
                 guard let tapped = context.coordinator.parent.highlights.first(where: { $0.id == event.decoration.id }) else { return }
                 context.coordinator.parent.onHighlightTapped?(
                     EPUBHighlightTapEvent(highlight: tapped, rect: event.rect)
@@ -984,6 +986,9 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
         var lastHighlights: [EPUBHighlight] = []
         /// Weak reference to the navigator for creating highlights from selection.
         weak var navigator: EPUBNavigatorViewController?
+        /// Set to `true` when a highlight decoration tap fires, so the
+        /// simultaneous UITapGestureRecognizer doesn't toggle the overlay.
+        var suppressNextTap = false
 
         init(_ parent: EPUBNavigatorWrapper) {
             self.parent = parent
@@ -991,7 +996,22 @@ public struct EPUBNavigatorWrapper: UIViewControllerRepresentable {
         }
 
         @objc func handleTap() {
-            parent.onTap?()
+            // Don't toggle overlay while the user has text selected
+            // (e.g. the "Highlight" menu is showing).
+            if navigator?.currentSelection != nil {
+                return
+            }
+            // Delay slightly so the decoration-interaction callback
+            // (which arrives asynchronously from Readium's JS bridge)
+            // has time to set `suppressNextTap` before we check it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                guard let self = self else { return }
+                if self.suppressNextTap {
+                    self.suppressNextTap = false
+                    return
+                }
+                self.parent.onTap?()
+            }
         }
 
         // MARK: - UIGestureRecognizerDelegate
