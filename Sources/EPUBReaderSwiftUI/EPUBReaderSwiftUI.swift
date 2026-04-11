@@ -46,6 +46,8 @@ public struct EPUBHighlight: Identifiable, Equatable, Hashable {
     public var locator: Locator
     public var color: EPUBHighlightColor
     public var style: EPUBHighlightStyle
+    /// An optional user note attached to the highlight.
+    public var note: String?
 
     /// The highlighted text, if available.
     public var highlightText: String? {
@@ -56,12 +58,14 @@ public struct EPUBHighlight: Identifiable, Equatable, Hashable {
         id: String = UUID().uuidString,
         locator: Locator,
         color: EPUBHighlightColor = .yellow,
-        style: EPUBHighlightStyle = .highlight
+        style: EPUBHighlightStyle = .highlight,
+        note: String? = nil
     ) {
         self.id = id
         self.locator = locator
         self.color = color
         self.style = style
+        self.note = note
     }
 }
 
@@ -72,7 +76,7 @@ public struct EPUBHighlight: Identifiable, Equatable, Hashable {
 // with standard `JSONEncoder` / `JSONDecoder`.
 extension EPUBHighlight: Codable {
     private enum CodingKeys: String, CodingKey {
-        case id, locatorJSON, color, style
+        case id, locatorJSON, color, style, note
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -80,6 +84,7 @@ extension EPUBHighlight: Codable {
         try container.encode(id, forKey: .id)
         try container.encode(color, forKey: .color)
         try container.encode(style, forKey: .style)
+        try container.encodeIfPresent(note, forKey: .note)
 
         // Serialize Locator via Readium's own JSON representation.
         guard let locatorString = locator.jsonString else {
@@ -96,6 +101,7 @@ extension EPUBHighlight: Codable {
         id = try container.decode(String.self, forKey: .id)
         color = try container.decode(EPUBHighlightColor.self, forKey: .color)
         style = try container.decode(EPUBHighlightStyle.self, forKey: .style)
+        note = try container.decodeIfPresent(String.self, forKey: .note)
 
         let locatorString = try container.decode(String.self, forKey: .locatorJSON)
         guard let loc = try Locator(jsonString: locatorString) else {
@@ -131,28 +137,34 @@ public struct EPUBHighlightTapEvent {
 }
 
 // MARK: - Default Highlight Edit Sheet
-/// Built-in sheet for editing or deleting a highlight (color, style, delete).
+/// Built-in sheet for editing or deleting a highlight (color, style, note, delete).
 /// Shown automatically when the user taps a highlight and no custom
 /// `onHighlightTapped` handler is provided.
 public struct DefaultHighlightEditSheet: View {
     let highlight: EPUBHighlight
     let onChangeColor: (EPUBHighlightColor) -> Void
     let onToggleStyle: () -> Void
+    let onUpdateNote: (String?) -> Void
     let onDelete: () -> Void
     let onDismiss: () -> Void
+
+    @State private var noteText: String = ""
 
     public init(
         highlight: EPUBHighlight,
         onChangeColor: @escaping (EPUBHighlightColor) -> Void,
         onToggleStyle: @escaping () -> Void,
+        onUpdateNote: @escaping (String?) -> Void,
         onDelete: @escaping () -> Void,
         onDismiss: @escaping () -> Void
     ) {
         self.highlight = highlight
         self.onChangeColor = onChangeColor
         self.onToggleStyle = onToggleStyle
+        self.onUpdateNote = onUpdateNote
         self.onDelete = onDelete
         self.onDismiss = onDismiss
+        _noteText = State(initialValue: highlight.note ?? "")
     }
 
     public var body: some View {
@@ -162,7 +174,12 @@ public struct DefaultHighlightEditSheet: View {
                 Text("Edit Highlight")
                     .font(.headline)
                 Spacer()
-                Button("Done", action: onDismiss)
+                Button("Done") {
+                    // Save note on dismiss — treat empty string as nil
+                    let trimmed = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    onUpdateNote(trimmed.isEmpty ? nil : trimmed)
+                    onDismiss()
+                }
             }
 
             // Highlighted text preview
@@ -195,6 +212,29 @@ public struct DefaultHighlightEditSheet: View {
                         }
                     }
                 }
+            }
+
+            // Note field
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Note")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextEditor(text: $noteText)
+                    .frame(minHeight: 60, maxHeight: 120)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(UIColor.separator), lineWidth: 0.5)
+                    )
+                    .overlay(alignment: .topLeading) {
+                        if noteText.isEmpty {
+                            Text("Add a note\u{2026}")
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 8)
+                                .allowsHitTesting(false)
+                        }
+                    }
             }
 
             HStack(spacing: 16) {
@@ -562,14 +602,19 @@ extension EPUBReaderView {
                             onChangeColor: { newColor in
                                 if let idx = highlights.firstIndex(where: { $0.id == hl.id }) {
                                     highlights[idx].color = newColor
+                                    editingHighlight = highlights[idx]
                                 }
-                                showHighlightPopover = false
                             },
                             onToggleStyle: {
                                 if let idx = highlights.firstIndex(where: { $0.id == hl.id }) {
                                     highlights[idx].style = highlights[idx].style == .highlight ? .underline : .highlight
+                                    editingHighlight = highlights[idx]
                                 }
-                                showHighlightPopover = false
+                            },
+                            onUpdateNote: { newNote in
+                                if let idx = highlights.firstIndex(where: { $0.id == hl.id }) {
+                                    highlights[idx].note = newNote
+                                }
                             },
                             onDelete: {
                                 highlights.removeAll { $0.id == hl.id }
