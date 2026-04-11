@@ -19,12 +19,141 @@ public enum EPUBSource {
     case remoteURL(String, useCache: Bool = true)
 }
 
+// MARK: - Overlay Context
+/// All the state and actions available to a custom reader overlay.
+public struct EPUBReaderOverlayContext {
+    // Book metadata
+    public let title: String?
+    public let author: String?
+
+    // Reading state
+    public let currentLocator: EPUBReaderSwiftUILocator?
+    public var chapterTitle: String? { currentLocator?.title }
+    public var totalProgression: Double? { currentLocator?.locations.totalProgression }
+
+    // Controls visibility (toggled by tapping the page)
+    public let showControls: Bool
+
+    // Font size — bind to a Slider or stepper in your overlay
+    public var fontSize: Binding<Double>
+
+    // Actions
+    public let close: () -> Void
+    public let showTableOfContents: () -> Void
+    public let toggleControls: () -> Void
+    /// Navigate to a specific overall progression (0.0 → 1.0).
+    public let goToProgression: (Double) -> Void
+}
+
+// MARK: - Default Overlay
+/// The built-in overlay used when no custom overlay is provided.
+public struct DefaultEPUBReaderOverlay: View {
+    public let context: EPUBReaderOverlayContext
+
+    public init(context: EPUBReaderOverlayContext) {
+        self.context = context
+    }
+
+    public var body: some View {
+        VStack {
+            if context.showControls {
+                topBar
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
+            Spacer()
+
+            if context.showControls {
+                bottomBar
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+    }
+
+    // MARK: - Top bar
+    private var topBar: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Button(action: context.close) {
+                    Image(systemName: "xmark")
+                        .font(.title3)
+                }
+
+                Button(action: context.showTableOfContents) {
+                    Image(systemName: "list.bullet")
+                        .font(.title3)
+                }
+
+                Text(context.title ?? "Unknown Title")
+                    .font(.headline)
+                    .lineLimit(1)
+
+                Spacer()
+
+                if let author = context.author {
+                    Text(author)
+                        .font(.subheadline)
+                        .lineLimit(1)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Font Size")
+                    .font(.caption)
+
+                HStack {
+                    Text("A")
+                        .font(.caption)
+
+                    Slider(value: context.fontSize, in: 0.75...2.0, step: 0.25)
+
+                    Text("A")
+                        .font(.title3)
+
+                    Text("\(Int(context.fontSize.wrappedValue * 100))%")
+                        .font(.caption)
+                        .frame(width: 50)
+                }
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(12)
+        .padding()
+    }
+
+    // MARK: - Bottom bar
+    private var bottomBar: some View {
+        VStack(spacing: 8) {
+            if let chapterTitle = context.chapterTitle {
+                Text(chapterTitle)
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+
+            if let progression = context.totalProgression {
+                HStack {
+                    ProgressView(value: progression)
+                    Text("\(Int(progression * 100))%")
+                        .font(.caption2)
+                        .frame(width: 40)
+                }
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(12)
+        .padding()
+    }
+}
+
 // MARK: - EPUBReaderView
-public struct EPUBReaderView: View {
+public struct EPUBReaderView<Overlay: View>: View {
     let source: EPUBSource
     let initialLocator: Locator?
     let initialPreferences: EPUBReaderSwiftUIPreferences
     let onClose: (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void
+    let overlay: (EPUBReaderOverlayContext) -> Overlay
 
     @MainActor @StateObject private var viewModel = EPUBReaderViewModel()
     @State private var fontSize: Double
@@ -32,24 +161,50 @@ public struct EPUBReaderView: View {
     @State private var showTOC = false
     @State private var currentLocator: Locator?
 
-    /// Initialize with an `EPUBSource` (local file or remote URL).
-    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
+    /// Initialize with an `EPUBSource` and a custom overlay.
+    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
         self.source = source
         self.initialLocator = initialLocator
         self.initialPreferences = initialPreferences
         self.onClose = onClose
+        self.overlay = overlay
         _fontSize = State(initialValue: initialPreferences.fontSize)
     }
 
-    /// Convenience: open a remote EPUB by URL string. Downloads and caches automatically.
+    /// Convenience: remote URL with custom overlay.
+    public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
+        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay)
+    }
+
+    /// Convenience: local file URL with custom overlay.
+    public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void, @ViewBuilder overlay: @escaping (EPUBReaderOverlayContext) -> Overlay) {
+        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose, overlay: overlay)
+    }
+}
+
+// MARK: - Default overlay inits (backward-compatible)
+extension EPUBReaderView where Overlay == DefaultEPUBReaderOverlay {
+
+    /// Initialize with an `EPUBSource` (local file or remote URL). Uses the default overlay.
+    public init(source: EPUBSource, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
+        self.init(source: source, initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose) { context in
+            DefaultEPUBReaderOverlay(context: context)
+        }
+    }
+
+    /// Convenience: open a remote EPUB by URL string. Downloads and caches automatically. Uses the default overlay.
     public init(remoteURL: String, useCache: Bool = true, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
         self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose)
     }
 
-    /// Convenience: open a local EPUB file URL (backwards-compatible).
+    /// Convenience: open a local EPUB file URL (backwards-compatible). Uses the default overlay.
     public init(url: URL, initialLocator: EPUBReaderSwiftUILocator? = nil, initialPreferences: EPUBReaderSwiftUIPreferences = EPUBReaderSwiftUIPreferences(), onClose: @escaping (EPUBReaderSwiftUILocator?, EPUBReaderSwiftUIPreferences) -> Void) {
         self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose)
     }
+}
+
+// MARK: - EPUBReaderView body & helpers
+extension EPUBReaderView {
 
     public var body: some View {
         ZStack {
@@ -134,99 +289,31 @@ public struct EPUBReaderView: View {
             )
             .ignoresSafeArea()
 
-            VStack {
-                if showControls {
-                    topBar(publication: publication)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
-
-                Spacer()
-
-                if showControls {
-                    bottomBar
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-        }
-    }
-
-    private func topBar(publication: Publication) -> some View {
-        VStack(spacing: 12) {
-            HStack {
-                Button(action: {
+            let context = EPUBReaderOverlayContext(
+                title: publication.metadata.title,
+                author: publication.metadata.authors.first?.name,
+                currentLocator: currentLocator,
+                showControls: showControls,
+                fontSize: $fontSize,
+                close: {
                     let preferences = EPUBReaderSwiftUIPreferences(fontSize: fontSize)
                     onClose(currentLocator, preferences)
-                }) {
-                    Image(systemName: "xmark")
-                        .font(.title3)
-                }
-
-                Button(action: { showTOC = true }) {
-                    Image(systemName: "list.bullet")
-                        .font(.title3)
-                }
-
-                Text(publication.metadata.title ?? "Unknown Title")
-                    .font(.headline)
-                    .lineLimit(1)
-
-                Spacer()
-
-                if let author = publication.metadata.authors.first?.name {
-                    Text(author)
-                        .font(.subheadline)
-                        .lineLimit(1)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Font Size")
-                    .font(.caption)
-
-                HStack {
-                    Text("A")
-                        .font(.caption)
-
-                    Slider(value: $fontSize, in: 0.75...2.0, step: 0.25)
-
-                    Text("A")
-                        .font(.title3)
-
-                    Text("\(Int(fontSize * 100))%")
-                        .font(.caption)
-                        .frame(width: 50)
-                }
-            }
-        }
-        .padding()
-        .background(.ultraThinMaterial)
-        .cornerRadius(12)
-        .padding()
-    }
-
-    private var bottomBar: some View {
-        VStack(spacing: 8) {
-            if let locator = currentLocator {
-                if let title = locator.title {
-                    Text(title)
-                        .font(.caption)
-                        .lineLimit(1)
-                }
-
-                if let progression = locator.locations.totalProgression {
-                    HStack {
-                        ProgressView(value: progression)
-                        Text("\(Int(progression * 100))%")
-                            .font(.caption2)
-                            .frame(width: 40)
+                },
+                showTableOfContents: { showTOC = true },
+                toggleControls: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showControls.toggle()
+                    }
+                },
+                goToProgression: { progression in
+                    Task {
+                        await viewModel.goToProgression(progression)
                     }
                 }
-            }
+            )
+
+            overlay(context)
         }
-        .padding()
-        .background(.ultraThinMaterial)
-        .cornerRadius(12)
-        .padding()
     }
 }
 
@@ -264,6 +351,15 @@ public class EPUBReaderViewModel: ObservableObject {
     func navigateToLink(_ link: ReadiumShared.Link) async {
         guard let locator = await publication?.locate(link) else { return }
         await navigator?.go(to: locator)
+    }
+
+    func goToProgression(_ progression: Double) async {
+        guard let publication = publication,
+              let navigator = navigator else { return }
+
+        let locator: Locator? = await publication.locate(progression: progression)
+        guard let locator else { return }
+        let _ = await navigator.go(to: locator)
     }
 
     func loadEPUB(source: EPUBSource, initialLocator: Locator?) async {
