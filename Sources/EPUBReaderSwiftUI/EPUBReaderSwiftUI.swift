@@ -426,6 +426,7 @@ public struct EPUBReaderOverlayContext {
 /// The built-in overlay used when no custom overlay is provided.
 public struct DefaultEPUBReaderOverlay: View {
     public let context: EPUBReaderOverlayContext
+    @State private var showFontSizeControls = false
 
     public init(context: EPUBReaderOverlayContext) {
         self.context = context
@@ -443,6 +444,12 @@ public struct DefaultEPUBReaderOverlay: View {
             if context.showControls {
                 bottomBar
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .onChange(of: context.showControls) { isVisible in
+            // Collapse the font controls whenever the overlay closes.
+            if !isVisible {
+                showFontSizeControls = false
             }
         }
     }
@@ -509,29 +516,48 @@ public struct DefaultEPUBReaderOverlay: View {
 
             Divider().opacity(0.5)
 
-            // Row 2: Compact font size control
+            // Row 2: Two-step font size control (tap to expand)
             HStack(spacing: 12) {
-                Button {
-                    context.fontSize.wrappedValue = max(0.75, context.fontSize.wrappedValue - 0.25)
-                } label: {
-                    Text("A")
-                        .font(.footnote)
-                        .frame(width: 32, height: 28)
-                        .background(Color.primary.opacity(0.08))
-                        .cornerRadius(6)
-                }
+                if showFontSizeControls {
+                    Button {
+                        context.fontSize.wrappedValue = max(0.75, context.fontSize.wrappedValue - 0.25)
+                    } label: {
+                        Text("A")
+                            .font(.footnote)
+                            .frame(width: 32, height: 28)
+                            .background(Color.primary.opacity(0.08))
+                            .cornerRadius(6)
+                    }
 
-                Slider(value: context.fontSize, in: 0.75...2.0, step: 0.25)
-                    .tint(.primary.opacity(0.4))
+                    Slider(value: context.fontSize, in: 0.75...2.0, step: 0.25)
+                        .tint(.primary.opacity(0.4))
 
-                Button {
-                    context.fontSize.wrappedValue = min(2.0, context.fontSize.wrappedValue + 0.25)
-                } label: {
-                    Text("A")
-                        .font(.title3)
-                        .frame(width: 32, height: 28)
-                        .background(Color.primary.opacity(0.08))
-                        .cornerRadius(6)
+                    Button {
+                        context.fontSize.wrappedValue = min(2.0, context.fontSize.wrappedValue + 0.25)
+                    } label: {
+                        Text("A")
+                            .font(.title3)
+                            .frame(width: 32, height: 28)
+                            .background(Color.primary.opacity(0.08))
+                            .cornerRadius(6)
+                    }
+
+                    Button {
+                        showFontSizeControls = false
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 24, height: 24)
+                            .background(Color.primary.opacity(0.08))
+                            .clipShape(Circle())
+                    }
+                } else {
+                    Button {
+                        showFontSizeControls = true
+                    } label: {
+                        Label("Font", systemImage: "textformat.size")
+                            .font(.caption.weight(.semibold))
+                    }
                 }
 
                 Text("\(Int(context.fontSize.wrappedValue * 100))%")
