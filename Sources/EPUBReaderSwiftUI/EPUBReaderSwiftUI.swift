@@ -7,12 +7,20 @@ import Combine
 @preconcurrency import ReadiumStreamer
 import ReadiumAdapterGCDWebServer
 
+// MARK: - EPUB Source
+public enum EPUBSource {
+    /// A local file URL pointing to an .epub file already on disk.
+    case fileURL(URL)
+    /// A remote URL string. The package will download and cache the file automatically.
+    case remoteURL(String, useCache: Bool = true)
+}
+
 // MARK: - EPUBReaderView
 public struct EPUBReaderView: View {
-    let url: URL
+    let source: EPUBSource
     let initialLocator: Locator?
-    let initialPreferences: ReadingPreferences  // Add this
-    let onClose: (Locator?, ReadingPreferences) -> Void  // Pass back preferences too
+    let initialPreferences: ReadingPreferences
+    let onClose: (Locator?, ReadingPreferences) -> Void
 
     @MainActor @StateObject private var viewModel = EPUBReaderViewModel()
     @State private var fontSize: Double
@@ -20,12 +28,23 @@ public struct EPUBReaderView: View {
     @State private var showTOC = false
     @State private var currentLocator: Locator?
 
-    public init(url: URL, initialLocator: Locator?, initialPreferences: ReadingPreferences = ReadingPreferences(), onClose: @escaping (Locator?, ReadingPreferences) -> Void) {
-        self.url = url
+    /// Initialize with an `EPUBSource` (local file or remote URL).
+    public init(source: EPUBSource, initialLocator: Locator? = nil, initialPreferences: ReadingPreferences = ReadingPreferences(), onClose: @escaping (Locator?, ReadingPreferences) -> Void) {
+        self.source = source
         self.initialLocator = initialLocator
         self.initialPreferences = initialPreferences
         self.onClose = onClose
         _fontSize = State(initialValue: initialPreferences.fontSize)
+    }
+
+    /// Convenience: open a remote EPUB by URL string. Downloads and caches automatically.
+    public init(remoteURL: String, useCache: Bool = true, initialLocator: Locator? = nil, initialPreferences: ReadingPreferences = ReadingPreferences(), onClose: @escaping (Locator?, ReadingPreferences) -> Void) {
+        self.init(source: .remoteURL(remoteURL, useCache: useCache), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose)
+    }
+
+    /// Convenience: open a local EPUB file URL (backwards-compatible).
+    public init(url: URL, initialLocator: Locator? = nil, initialPreferences: ReadingPreferences = ReadingPreferences(), onClose: @escaping (Locator?, ReadingPreferences) -> Void) {
+        self.init(source: .fileURL(url), initialLocator: initialLocator, initialPreferences: initialPreferences, onClose: onClose)
     }
 
     public var body: some View {
@@ -35,7 +54,7 @@ public struct EPUBReaderView: View {
 
             if viewModel.isLoading {
                 VStack(spacing: 16) {
-                    ProgressView("Loading EPUB...")
+                    ProgressView(viewModel.loadingMessage)
                     
                     Button(action: {
                         onClose(nil, ReadingPreferences(fontSize: fontSize))
@@ -79,7 +98,7 @@ public struct EPUBReaderView: View {
             }
         }
         .task {
-            await viewModel.loadEPUB(from: url, initialLocator: initialLocator)
+            await viewModel.loadEPUB(source: source, initialLocator: initialLocator)
         }
         .sheet(isPresented: $showTOC) {
             TableOfContentsView(
@@ -212,6 +231,7 @@ public struct EPUBReaderView: View {
 public class EPUBReaderViewModel: ObservableObject {
     @Published public var publication: Publication?
     @Published public var isLoading = false
+    @Published public var loadingMessage = "Loading EPUB..."
     @Published public var error: String?
     @Published public var tableOfContents: [ReadiumShared.Link] = []
 
@@ -242,10 +262,33 @@ public class EPUBReaderViewModel: ObservableObject {
         await navigator?.go(to: locator)
     }
 
-    func loadEPUB(from url: URL, initialLocator: Locator?) async {
+    func loadEPUB(source: EPUBSource, initialLocator: Locator?) async {
         isLoading = true
         error = nil
 
+        // Resolve the local file URL from the source
+        let localURL: URL
+        switch source {
+        case .fileURL(let url):
+            loadingMessage = "Loading EPUB..."
+            localURL = url
+        case .remoteURL(let urlString, let useCache):
+            loadingMessage = "Downloading EPUB..."
+            do {
+                localURL = try await EPUBDownloader.downloadEPUB(from: urlString, useCache: useCache)
+                loadingMessage = "Loading EPUB..."
+            } catch {
+                self.error = "Download failed: \(error.localizedDescription)"
+                isLoading = false
+                return
+            }
+        }
+
+        await openEPUB(from: localURL, initialLocator: initialLocator)
+    }
+
+    /// Opens an EPUB from a local file URL (shared logic).
+    private func openEPUB(from url: URL, initialLocator: Locator?) async {
         self.httpServer = GCDHTTPServer(assetRetriever: assetRetriever)
 
         guard let fileURL = FileURL(url: url) else {
